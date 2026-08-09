@@ -50,16 +50,18 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    """ รองรับการอ่านค่าทั้งจาก Environment Variable บน Render และไฟล์เครื่องคอม """
+    """ อ่านค่า JSON จาก Env Var และแก้ไขการขึ้นบรรทัดใหม่ใน Private Key ให้ถูกต้อง """
     google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
         creds_dict = json.loads(google_creds_json)
+        # แก้ไขปัญหาเครื่องหมาย \n ในรหัสลับที่มักเพี้ยนเวลาวางใน Render
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def run_stock_sync():
-    """ ฟังก์ชันประมวลผลสต็อกตัวเดียวกับ main.py เดิมของคุณ """
     print("🔒 กำลังเชื่อมต่อกับ Google Sheets API...")
     creds = get_google_credentials()
     client = gspread.authorize(creds)
@@ -129,14 +131,9 @@ def run_stock_sync():
         if match_data is not None:
             found_count += 1
             df_target, target_row = match_data
-            new_qty = clean_num(df_target.iloc[target_row, NEW_COL_INDEX])
-            old_qty = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            proj_bookings = {p: int(sum(clean_num(df_target.iloc[target_row, c]) for c in cols)) 
-                             for p, cols in project_col_map.items() if sum(clean_num(df_target.iloc[target_row, c]) for c in cols) != 0}
-
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
                 'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
@@ -172,8 +169,7 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
-    
-    if user_msg == "อัปเดตสต็อก" or user_msg == "sync":
+    if user_msg in ["อัปเดตสต็อก", "sync"]:
         try:
             count = run_stock_sync()
             reply_text = f"✅ อัปเดตข้อมูลสต็อกสำเร็จ! ประมวลผลสำเร็จ {count} รายการ"
@@ -182,10 +178,7 @@ def handle_message(event):
     else:
         reply_text = f"พิมพ์คำว่า 'อัปเดตสต็อก' เพื่อสั่งประมวลผลข้อมูลผ่านคลาวด์ได้เลยครับ"
 
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
