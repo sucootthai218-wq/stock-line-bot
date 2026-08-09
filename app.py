@@ -26,20 +26,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-FILE_IDS = [
-    "1M7YJzGsNRTSQswyxdHHiDDXAuX1h7U4a",
-    "1HwUNEZ1wwwne2-ZG0ogluODTdmAAdTSg",
-]
-
+# ใช้ Folder ID ของ Google Drive
+DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
 HEADER_ROW = 4
-CODE_B_INDEX = 1        # คอลัมน์ B (รหัสสินค้าหลัก)
-CODE_C_INDEX = 2        # คอลัมน์ C (รหัสสำรอง/Code Express)
+CODE_B_INDEX = 1
+CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
-NEW_COL_INDEX = 12      # คอลัมน์ M
-OLD_COL_INDEX = 13      # คอลัมน์ N
-BALANCE_COL_INDEX = 63  # คอลัมน์ BL
+NEW_COL_INDEX = 12
+OLD_COL_INDEX = 13
+BALANCE_COL_INDEX = 63
 
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
@@ -66,13 +63,9 @@ def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
-    
+
     # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order
-    try:
-        ws_input = spreadsheet.worksheet("Input_Order")
-    except:
-        ws_input = spreadsheet.add_worksheet(title="Input_Order", rows="100", cols="10")
-        
+    ws_input = spreadsheet.worksheet("Input_Order")
     ws_input.clear()
     
     lines = user_msg.strip().split('\n')
@@ -83,21 +76,30 @@ def process_order_and_get_summary(user_msg):
             input_data.append([parts[0], parts[1]])
         elif len(parts) == 1:
             input_data.append([parts[0], "1"])
+
     ws_input.update(input_data, 'A1')
 
-    # 2. รันระบบประมวลผลสต็อก (ดึงไฟล์และคำนวณ)
-    existing_files = glob.glob("*.xlsx")
-    if len(existing_files) < len(FILE_IDS):
-        for f in glob.glob("*.xlsx"):
-            try: os.remove(f)
-            except: pass
-        for file_id in FILE_IDS:
-            gdown.download(id=file_id, output=f"{file_id}.xlsx", quiet=True)
-            
+    # 2. ล้างไฟล์ Excel เก่าในเซิร์ฟเวอร์ทิ้งก่อนทุกครั้ง
+    for f in glob.glob("*.xlsx"):
+        try:
+            os.remove(f)
+        except:
+            pass
+
+    # 3. ค้นหาและดาวน์โหลดไฟล์ .xlsx ทั้งหมดจาก Google Drive Folder อัตโนมัติ
+    drive_service = build('drive', 'v3', credentials=creds)
+    query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
+    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    files = results.get('files', [])
+
+    for file in files:
+        file_id = file['id']
+        file_name = file['name']
+        gdown.download(id=file_id, output=file_name, quiet=False)
+
+    # 4. ประมวลผลไฟล์ Excel ที่อยู่ในโฟลเดอร์
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
-    
-    global_code_map = {} 
-    project_col_map = {}
+    global_code_map = {}
     combined_headers = []
 
     for file_path in all_xlsx:
@@ -108,40 +110,21 @@ def process_order_and_get_summary(user_msg):
         
         for r in range(HEADER_ROW + 1, len(df_raw)):
             for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
-                if col_idx < num_cols:
-                    c_val = df_raw.iloc[r, col_idx]
-                    if pd.notna(c_val):
-                        norm_c = normalize_code(c_val)
-                        if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
-                            if norm_c not in global_code_map:
-                                global_code_map[norm_c] = (df_raw, r)
+                c_val = df_raw.iloc[r, col_idx]
+                if pd.notna(c_val):
+                    norm_c = normalize_code(c_val)
+                    if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
+                        if norm_c not in global_code_map:
+                            global_code_map[norm_c] = (df_raw, r)
                             
         for c in range(num_cols):
             txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
             combined_headers.append(" ".join(txts))
 
     df_input = pd.DataFrame(ws_input.get_all_records())
-    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "dift"]
-
-    sample_df = all_xlsx and pd.read_excel(all_xlsx[0], sheet_name=0, header=None, engine='openpyxl')
-    num_cols_sample = sample_df.shape[1] if sample_df is not None else 0
-
-    for c in range(num_cols_sample):
-        if c in [CODE_B_INDEX, CODE_C_INDEX, DESC_COL_INDEX, NEW_COL_INDEX, OLD_COL_INDEX, BALANCE_COL_INDEX]: continue
-        h_text = combined_headers[c].lower() if c < len(combined_headers) else ""
-        if any(k in h_text for k in excluded_kw): continue
-        
-        if c < len(combined_headers):
-            pcode_match = re.search(r'\b([A-Z0-9]{2,6})\b', combined_headers[c].upper())
-            if pcode_match:
-                pcode = pcode_match.group(1)
-                if pcode not in ["NEW", "OLD", "QTY", "KG", "TOTAL", "PO", "BROKEN", "REPAIR"]:
-                    if pcode not in project_col_map: project_col_map[pcode] = []
-                    project_col_map[pcode].append(c)
-
     report_items = []
-    input_code_col = next((c for c in df_input.columns if "code" in str(c).lower() or "รหัส" in str(c)), df_input.columns[0])
-    input_qty_col = next((c for c in df_input.columns if "qty" in str(c).lower() or "จำนวน" in str(c)), df_input.columns[1])
+    input_code_col = df_input.columns[0]
+    input_qty_col = df_input.columns[1]
 
     for _, row in df_input.iterrows():
         raw_code = str(row[input_code_col]).strip()
@@ -151,73 +134,53 @@ def process_order_and_get_summary(user_msg):
         match_data = global_code_map.get(norm_input)
         if match_data is not None:
             df_target, target_row = match_data
-            
-            # ป้องกัน Error Out of bounds (แถวเกินขนาด DataFrame)
-            if target_row >= len(df_target):
-                continue
-            
-            new_qty = clean_num(df_target.iloc[target_row, NEW_COL_INDEX]) if NEW_COL_INDEX < df_target.shape[1] else 0.0
-            old_qty = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
-            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
-            desc_val = str(df_target.iloc[target_row, DESC_COL_INDEX]) if DESC_COL_INDEX < df_target.shape[1] else ""
-            code_val = str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code
-            
+            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
+            new_val = clean_num(df_target.iloc[target_row, NEW_COL_INDEX])
+            old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            proj_bookings = {p: int(sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1])) 
-                             for p, cols in project_col_map.items() if sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1]) != 0}
-
             report_items.append({
-                'code': code_val, 
-                'desc': desc_val,
-                'new': int(new_qty),
-                'old': int(old_qty),
-                'on_hand': int(new_qty + old_qty),
-                'balance': int(balance),
+                'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
+                'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
-                'bookings': proj_bookings
+                'balance': int(balance),
+                'new': int(new_val) if new_val != 0 else "-",
+                'old': int(old_val) if old_val != 0 else "-"
             })
         else:
             report_items.append({
                 'code': raw_code, 
-                'desc': "⚠️ ไม่พบรหัส",
-                'new': "-",
-                'old': "-",
-                'on_hand': "-",
-                'balance': "-",
+                'desc': "ไม่พบรหัส",
                 'shortage': int(qty_needed),
-                'bookings': {}
+                'balance': "-",
+                'new': "-",
+                'old': "-"
             })
 
-    # 3. สร้างข้อความสรุปผลส่งกลับไปที่หน้าจอ LINE และอัปเดตชีต Summary
+    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE จัดรูปแบบให้อ่านง่าย
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
-        summary_text += f"\n📦 {item['code']} ({item['desc']})\n- สต็อกรวม: {item['balance']}\n- ขาด: {item['shortage']}\n- ของใหม่: {item['new']}\n- ของเก่า: {item['old']}\n"
-        if item['bookings']:
-            summary_text += "- ติดจอง:\n"
-            for p, q in item['bookings'].items():
-                summary_text += f"  • {p}: {q}\n"
+        summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
+        summary_text += f"- สต็อกรวม: {item['balance']}\n"
+        summary_text += f"- ขาด: {item['shortage']}\n"
+        summary_text += f"- ของใหม่: {item['new']}\n"
+        summary_text += f"- ของเก่า: {item['old']}\n"
 
-    active_projects = sorted(list({p for item in report_items for p in item['bookings'].keys()}))
-    header = ["รหัสสินค้า", "รายการ", "New", "Old", "On Hand", "สต็อก Balance", "ขาด"] + active_projects
-    table_data = [header] + [
-        [i['code'], i['desc'], i['new'], i['old'], i['on_hand'], i['balance'], i['shortage']] + 
-        [i['bookings'].get(p, "-") for p in active_projects] 
-        for i in report_items
-    ]
-
+    # อัปเดตลงชีต Summary
     try:
+        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า"]
+        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage'], i['new'], i['old']] for i in report_items]
         ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
         ws_summary.clear()
         ws_summary.update(table_data, 'A1')
     except Exception as e:
-        print(f"Error updating Summary: {e}")
+        print(f"Warning: Could not update Summary sheet: {e}")
 
     return summary_text
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature', '')
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -232,6 +195,7 @@ def handle_message(event):
         reply_text = process_order_and_get_summary(user_msg)
     except Exception as e:
         reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
+
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 if __name__ == "__main__":
