@@ -196,7 +196,7 @@ def process_order_and_get_summary(user_msg):
                 'shortage': int(qty_needed),
                 'on_hand': "-",
                 'balance': "-",
-                'new": "-",
+                'new': "-",
                 'old': "-",
                 'bookings': {}
             })
