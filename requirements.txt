@@ -1,9 +1,11 @@
+flask
+gunicorn
+line-bot-sdk
 gspread
 pandas
 openpyxl
 gdown
 google-auth
-flask
-gunicorn
-line-bot-sdk
+google-auth-oauthlib
+google-api-python-client
 requests
