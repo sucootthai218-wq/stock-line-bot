@@ -26,7 +26,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# ใช้ Folder ID ของ Google Drive ที่คุณส่งมา
+# ใช้ Folder ID ของ Google Drive
 DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
@@ -79,7 +79,7 @@ def process_order_and_get_summary(user_msg):
 
     ws_input.update(input_data, 'A1')
 
-    # 2. ล้างไฟล์ Excel เก่าในเซิร์ฟเวอร์ทิ้งก่อนทุกครั้ง เพื่อป้องกันการใช้ข้อมูลเก่า
+    # 2. ล้างไฟล์ Excel เก่าในเซิร์ฟเวอร์ทิ้งก่อนทุกครั้ง
     for f in glob.glob("*.xlsx"):
         try:
             os.remove(f)
@@ -135,31 +135,41 @@ def process_order_and_get_summary(user_msg):
         if match_data is not None:
             df_target, target_row = match_data
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
+            new_val = clean_num(df_target.iloc[target_row, NEW_COL_INDEX])
+            old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
                 'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
-                'balance': int(balance)
+                'balance': int(balance),
+                'new': int(new_val) if new_val != 0 else "-",
+                'old': int(old_val) if old_val != 0 else "-"
             })
         else:
             report_items.append({
                 'code': raw_code, 
                 'desc': "ไม่พบรหัส",
                 'shortage': int(qty_needed),
-                'balance': "-"
+                'balance': "-",
+                'new': "-",
+                'old': "-"
             })
 
-    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE
+    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE จัดรูปแบบให้อ่านง่าย
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
-        summary_text += f"- {item['code']} ({item['desc']}): คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
+        summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
+        summary_text += f"- สต็อกรวม: {item['balance']}\n"
+        summary_text += f"- ขาด: {item['shortage']}\n"
+        summary_text += f"- ของใหม่: {item['new']}\n"
+        summary_text += f"- ของเก่า: {item['old']}\n"
 
     # อัปเดตลงชีต Summary
     try:
-        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
-        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
+        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า"]
+        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage'], i['new'], i['old']] for i in report_items]
         ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
         ws_summary.clear()
         ws_summary.update(table_data, 'A1')
