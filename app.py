@@ -108,12 +108,13 @@ def process_order_and_get_summary(user_msg):
         
         for r in range(HEADER_ROW + 1, len(df_raw)):
             for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
-                c_val = df_raw.iloc[r, col_idx]
-                if pd.notna(c_val):
-                    norm_c = normalize_code(c_val)
-                    if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
-                        if norm_c not in global_code_map:
-                            global_code_map[norm_c] = (df_raw, r)
+                if col_idx < num_cols:
+                    c_val = df_raw.iloc[r, col_idx]
+                    if pd.notna(c_val):
+                        norm_c = normalize_code(c_val)
+                        if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
+                            if norm_c not in global_code_map:
+                                global_code_map[norm_c] = (df_raw, r)
                             
         for c in range(num_cols):
             txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
@@ -151,18 +152,24 @@ def process_order_and_get_summary(user_msg):
         if match_data is not None:
             df_target, target_row = match_data
             
-            new_qty = clean_num(df_target.iloc[target_row, NEW_COL_INDEX])
-            old_qty = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
-            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
+            # ป้องกัน Error Out of bounds (แถวเกินขนาด DataFrame)
+            if target_row >= len(df_target):
+                continue
+            
+            new_qty = clean_num(df_target.iloc[target_row, NEW_COL_INDEX]) if NEW_COL_INDEX < df_target.shape[1] else 0.0
+            old_qty = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
+            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
+            desc_val = str(df_target.iloc[target_row, DESC_COL_INDEX]) if DESC_COL_INDEX < df_target.shape[1] else ""
+            code_val = str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code
             
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            proj_bookings = {p: int(sum(clean_num(df_target.iloc[target_row, c]) for c in cols)) 
-                             for p, cols in project_col_map.items() if sum(clean_num(df_target.iloc[target_row, c]) for c in cols) != 0}
+            proj_bookings = {p: int(sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1])) 
+                             for p, cols in project_col_map.items() if sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1]) != 0}
 
             report_items.append({
-                'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
-                'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
+                'code': code_val, 
+                'desc': desc_val,
                 'new': int(new_qty),
                 'old': int(old_qty),
                 'on_hand': int(new_qty + old_qty),
