@@ -10,7 +10,6 @@ from google.oauth2.service_account import Credentials
 import gspread
 import pandas as pd
 import gdown
-from openpyxl import load_workbook
 
 app = Flask(__name__)
 
@@ -31,13 +30,16 @@ FILE_IDS = [
 ]
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
-HEADER_ROW = 4  # บรรทัดที่เป็นหัวตาราง (นับแบบ 0-indexed, แถวที่ 5 ใน Excel)
+HEADER_ROW = 4
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
+NEW_COL_INDEX = 12
+OLD_COL_INDEX = 13
+BALANCE_COL_INDEX = 63
 
 def clean_num(val):
-    if val is None: return 0.0
+    if pd.isna(val) or val is None: return 0.0
     s = str(val).replace(',', '').strip()
     if s in ["-", "_", "", "nan", "None"]: return 0.0
     try: return float(s)
@@ -62,9 +64,11 @@ def process_order_and_get_summary(user_msg):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
+    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order (แยกบรรทัดหรือบันทึกตามรูปแบบที่คุณต้องการ)
     ws_input = spreadsheet.worksheet("Input_Order")
-    ws_input.clear()
+    ws_input.clear() # ล้างข้อมูลเก่าหรือจะใช้วิธี append ตามโครงสร้างเดิมของคุณ
     
+    # แปลงข้อความที่พิมพ์มา (รองรับหลายบรรทัด) ใส่ลงตาราง
     lines = user_msg.strip().split('\n')
     input_data = [["Code", "Qty"]]
     for line in lines:
@@ -76,54 +80,38 @@ def process_order_and_get_summary(user_msg):
 
     ws_input.update(input_data, 'A1')
 
-    # ดาวน์โหลดไฟล์เฉพาะตอนที่ยังไม่มีในเครื่อง
-    for i, file_id in enumerate(FILE_IDS):
-        filename = f"stock_data_{i}.xlsx"
-        if not os.path.exists(filename):
-            gdown.download(id=file_id, output=filename, quiet=False)
+    # 2. รันระบบประมวลผลสต็อก (ดึงไฟล์และคำนวณ)
+    existing_files = glob.glob("*.xlsx")
+    if len(existing_files) < len(FILE_IDS):
+        for file_id in FILE_IDS:
+            gdown.download(id=file_id, quiet=False)
 
-    all_xlsx = [f for f in glob.glob("stock_data_*.xlsx") if not os.path.basename(f).startswith("~$")]
+    all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
+    combined_headers = []
 
     for file_path in all_xlsx:
-        wb = load_workbook(filename=file_path, read_only=True, data_only=True)
-        sheet = wb.active
+        excel_file_obj = pd.ExcelFile(file_path)
+        sheet_name = excel_file_obj.sheet_names[0]
+        df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
+        num_cols = df_raw.shape[1]
         
-        balance_col_idx = None
-        rows_iter = sheet.iter_rows(values_only=True)
-        
-        for r_idx, row in enumerate(rows_iter):
-            if r_idx == HEADER_ROW:
-                for c_idx, cell_val in enumerate(row):
-                    if cell_val and any(kw in str(cell_val).lower() for kw in ['balance', 'stock', 'คงเหลือ', 'on hand']):
-                        balance_col_idx = c_idx
-                        break
-                break
-        
-        if balance_col_idx is None:
-            balance_col_idx = 63
-
-        sheet_reset = wb.active
-        for r_idx, row in enumerate(sheet_reset.iter_rows(values_only=True)):
-            if r_idx > HEADER_ROW:
-                for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
-                    if col_idx < len(row) and row[col_idx] is not None:
-                        c_val = row[col_idx]
-                        norm_c = normalize_code(c_val)
-                        if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
-                            if norm_c not in global_code_map:
-                                code_b = row[CODE_B_INDEX] if CODE_B_INDEX < len(row) else c_val
-                                desc = row[DESC_COL_INDEX] if DESC_COL_INDEX < len(row) else ""
-                                balance = row[balance_col_idx] if balance_col_idx < len(row) else 0.0
-                                
-                                global_code_map[norm_c] = {
-                                    'code': str(code_b),
-                                    'desc': str(desc),
-                                    'balance': clean_num(balance)
-                                }
-        wb.close()
+        for r in range(HEADER_ROW + 1, len(df_raw)):
+            for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
+                c_val = df_raw.iloc[r, col_idx]
+                if pd.notna(c_val):
+                    norm_c = normalize_code(c_val)
+                    if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
+                        if norm_c not in global_code_map:
+                            global_code_map[norm_c] = (df_raw, r)
+                            
+        for c in range(num_cols):
+            txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
+            combined_headers.append(" ".join(txts))
 
     df_input = pd.DataFrame(ws_input.get_all_records())
+    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "dift"]
+
     report_items = []
     input_code_col = df_input.columns[0]
     input_qty_col = df_input.columns[1]
@@ -135,12 +123,13 @@ def process_order_and_get_summary(user_msg):
         
         match_data = global_code_map.get(norm_input)
         if match_data is not None:
-            balance = match_data['balance']
+            df_target, target_row = match_data
+            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             report_items.append({
-                'code': match_data['code'], 
-                'desc': match_data['desc'],
+                'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
+                'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
                 'balance': int(balance)
             })
@@ -152,20 +141,17 @@ def process_order_and_get_summary(user_msg):
                 'balance': "-"
             })
 
-    # แสดงผลเฉพาะรหัสสินค้า (ตัดรายละเอียดออกแล้ว)
+    # 3. สร้างข้อความสรุปผลส่งกลับไปที่หน้าจอ LINE ทันที
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
-        summary_text += f"- {item['code']}: คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
+        summary_text += f"- {item['code']} ({item['desc']}): คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
 
-    # อัปเดตลง Google Sheets หน้า Summary แบบครอบด้วย try-except ป้องกัน Error 500 ขัดจังหวะการส่ง LINE
-    try:
-        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
-        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
-        ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
-        ws_summary.clear()
-        ws_summary.update(table_data, 'A1')
-    except Exception as e:
-        print(f"Warning: Could not update Summary sheet: {e}")
+    # อัปเดตลงชีต Summary ด้วย
+    header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
+    table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
+    ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
+    ws_summary.clear()
+    ws_summary.update(table_data, 'A1')
 
     return summary_text
 
@@ -182,7 +168,9 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
+    
     try:
+        # เมื่อพิมพ์ส่งข้อความใดๆ เข้ามา จะทำการประมวลผลและดึงสรุปยอดจากหน้า Summary ส่งกลับทันที
         reply_text = process_order_and_get_summary(user_msg)
     except Exception as e:
         reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
