@@ -10,7 +10,6 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 import pandas as pd
-import gdown
 
 app = Flask(__name__)
 
@@ -26,7 +25,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# ใช้ Folder ID ของ Google Drive
 DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
@@ -100,7 +98,10 @@ def process_order_and_get_summary(user_msg):
     # 4. ประมวลผลไฟล์ Excel ที่อยู่ในโฟลเดอร์
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
+    project_col_map = {}
     combined_headers = []
+
+    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "dift"]
 
     for file_path in all_xlsx:
         excel_file_obj = pd.ExcelFile(file_path)
@@ -110,16 +111,30 @@ def process_order_and_get_summary(user_msg):
         
         for r in range(HEADER_ROW + 1, len(df_raw)):
             for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
-                c_val = df_raw.iloc[r, col_idx]
-                if pd.notna(c_val):
-                    norm_c = normalize_code(c_val)
-                    if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
-                        if norm_c not in global_code_map:
-                            global_code_map[norm_c] = (df_raw, r)
+                if col_idx < num_cols:
+                    c_val = df_raw.iloc[r, col_idx]
+                    if pd.notna(c_val):
+                        norm_c = normalize_code(c_val)
+                        if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
+                            if norm_c not in global_code_map:
+                                global_code_map[norm_c] = (df_raw, r)
                             
         for c in range(num_cols):
             txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
-            combined_headers.append(" ".join(txts))
+            h_joined = " ".join(txts)
+            combined_headers.append(h_joined)
+            
+            # ค้นหาคอลัมน์ที่เป็นรหัสโครงการ
+            h_lower = h_joined.lower()
+            if not any(k in h_lower for k in excluded_kw):
+                pcode_match = re.search(r'\b([A-Z0-9]{2,6})\b', h_joined.upper())
+                if pcode_match:
+                    pcode = pcode_match.group(1)
+                    if pcode not in ["NEW", "OLD", "QTY", "KG", "TOTAL", "PO", "BROKEN", "REPAIR"]:
+                        if pcode not in project_col_map:
+                            project_col_map[pcode] = []
+                        if c not in project_col_map[pcode]:
+                            project_col_map[pcode].append(c)
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
@@ -134,18 +149,30 @@ def process_order_and_get_summary(user_msg):
         match_data = global_code_map.get(norm_input)
         if match_data is not None:
             df_target, target_row = match_data
-            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
-            new_val = clean_num(df_target.iloc[target_row, NEW_COL_INDEX])
-            old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
+            
+            if target_row >= len(df_target):
+                continue
+                
+            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
+            new_val = clean_num(df_target.iloc[target_row, NEW_COL_INDEX]) if NEW_COL_INDEX < df_target.shape[1] else 0.0
+            old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
+            # ดึงยอดจองเฉพาะคอลัมน์ของโครงการนั้นๆ จริงๆ (กรองเฉพาะค่าที่ไม่เป็น 0)
+            proj_bookings = {}
+            for p, cols in project_col_map.items():
+                p_sum = sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1])
+                if p_sum != 0:
+                    proj_bookings[p] = int(p_sum)
+
             report_items.append({
-                'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
-                'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
+                'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
+                'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]) if DESC_COL_INDEX < df_target.shape[1] else "",
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
                 'balance': int(balance),
                 'new': int(new_val) if new_val != 0 else "-",
-                'old': int(old_val) if old_val != 0 else "-"
+                'old': int(old_val) if old_val != 0 else "-",
+                'bookings': proj_bookings
             })
         else:
             report_items.append({
@@ -154,7 +181,8 @@ def process_order_and_get_summary(user_msg):
                 'shortage': int(qty_needed),
                 'balance': "-",
                 'new': "-",
-                'old': "-"
+                'old': "-",
+                'bookings': {}
             })
 
     # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE จัดรูปแบบให้อ่านง่าย
@@ -165,11 +193,22 @@ def process_order_and_get_summary(user_msg):
         summary_text += f"- ขาด: {item['shortage']}\n"
         summary_text += f"- ของใหม่: {item['new']}\n"
         summary_text += f"- ของเก่า: {item['old']}\n"
+        
+        if item['bookings']:
+            summary_text += "- ติดจอง:\n"
+            for p, q in item['bookings'].items():
+                summary_text += f"  • {p}: {q}\n"
 
     # อัปเดตลงชีต Summary
     try:
-        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า"]
-        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage'], i['new'], i['old']] for i in report_items]
+        active_projects = sorted(list({p for item in report_items for p in item['bookings'].keys()}))
+        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า"] + active_projects
+        table_data = [header] + [
+            [i['code'], i['desc'], i['balance'], i['shortage'], i['new'], i['old']] + 
+            [i['bookings'].get(p, "-") for p in active_projects] 
+            for i in report_items
+        ]
+        
         ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
         ws_summary.clear()
         ws_summary.update(table_data, 'A1')
