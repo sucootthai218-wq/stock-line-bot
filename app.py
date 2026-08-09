@@ -10,6 +10,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 import pandas as pd
+import gdown
 
 app = Flask(__name__)
 
@@ -124,7 +125,7 @@ def process_order_and_get_summary(user_msg):
             h_joined = " ".join(txts)
             combined_headers.append(h_joined)
             
-            # ค้นหาคอลัมน์ที่เป็นรหัสโครงการ
+            # ค้นหาคอลัมน์ที่เป็นรหัสโครงการจากหัวตาราง
             h_lower = h_joined.lower()
             if not any(k in h_lower for k in excluded_kw):
                 pcode_match = re.search(r'\b([A-Z0-9]{2,6})\b', h_joined.upper())
@@ -158,7 +159,7 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            # ดึงยอดจองเฉพาะคอลัมน์ของโครงการนั้นๆ จริงๆ (กรองเฉพาะค่าที่ไม่เป็น 0)
+            # ดึงยอดจองของแต่ละโครงการ (เช็คทุกคอลัมน์ที่ผูกกับรหัสโครงการนั้นๆ)
             proj_bookings = {}
             for p, cols in project_col_map.items():
                 p_sum = sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1])
@@ -185,7 +186,7 @@ def process_order_and_get_summary(user_msg):
                 'bookings': {}
             })
 
-    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE จัดรูปแบบให้อ่านง่าย
+    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE พร้อมแสดงรายการติดจอง
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
