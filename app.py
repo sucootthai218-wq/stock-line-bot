@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 
 app = Flask(__name__)
 
+# ดึงค่า LINE Token และ Secret จาก Environment Variables บน Render
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -88,7 +89,6 @@ def process_order_and_get_summary(user_msg):
         wb = load_workbook(filename=file_path, read_only=True, data_only=True)
         sheet = wb.active
         
-        # ค้นหาตำแหน่งคอลัมน์ Balance / คงเหลือ จากบรรทัดหัวตารางอัตโนมัติ
         balance_col_idx = None
         rows_iter = sheet.iter_rows(values_only=True)
         
@@ -100,11 +100,9 @@ def process_order_and_get_summary(user_msg):
                         break
                 break
         
-        # ถ้าหาไม่เจอจากคีย์เวิร์ด ให้ใช้ค่าสำรอง (เช่น คอลัมน์ที่ 63 ตามเดิม)
         if balance_col_idx is None:
             balance_col_idx = 63
 
-        # อ่านข้อมูลสินค้าแต่ละแถว
         sheet_reset = wb.active
         for r_idx, row in enumerate(sheet_reset.iter_rows(values_only=True)):
             if r_idx > HEADER_ROW:
@@ -154,16 +152,20 @@ def process_order_and_get_summary(user_msg):
                 'balance': "-"
             })
 
-    # แสดงผลเฉพาะรหัสสินค้า ตัดวงเล็บรายละเอียดออก
+    # แสดงผลเฉพาะรหัสสินค้า (ตัดรายละเอียดออกแล้ว)
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"- {item['code']}: คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
 
-    header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
-    table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
-    ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worship(title="Summary", rows="100", cols="30") if hasattr(spreadsheet, 'add_worship') else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
-    ws_summary.clear()
-    ws_summary.update(table_data, 'A1')
+    # อัปเดตลง Google Sheets หน้า Summary แบบครอบด้วย try-except ป้องกัน Error 500 ขัดจังหวะการส่ง LINE
+    try:
+        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
+        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
+        ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
+        ws_summary.clear()
+        ws_summary.update(table_data, 'A1')
+    except Exception as e:
+        print(f"Warning: Could not update Summary sheet: {e}")
 
     return summary_text
 
