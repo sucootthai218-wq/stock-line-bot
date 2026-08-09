@@ -100,7 +100,9 @@ def process_order_and_get_summary(user_msg):
     # 4. ประมวลผลไฟล์ Excel ที่อยู่ในโฟลเดอร์
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
-    combined_headers = []
+    
+    # เก็บชื่อหัวตารางของแต่ละคอลัมน์เพื่อนำมาใช้แสดงชื่อโครงการที่ติดจอง
+    column_headers = {}
 
     for file_path in all_xlsx:
         excel_file_obj = pd.ExcelFile(file_path)
@@ -108,6 +110,13 @@ def process_order_and_get_summary(user_msg):
         df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
         num_cols = df_raw.shape[1]
         
+        # ดึงชื่อหัวคอลัมน์จากแถว HEADER_ROW (หรือรวมแถวใกล้เคียงเป็นชื่อโครงการ)
+        for c in range(num_cols):
+            txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 2, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
+            header_name = " ".join(txts)
+            if header_name:
+                column_headers[c] = header_name
+
         for r in range(HEADER_ROW + 1, len(df_raw)):
             for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
                 c_val = df_raw.iloc[r, col_idx]
@@ -115,17 +124,15 @@ def process_order_and_get_summary(user_msg):
                     norm_c = normalize_code(c_val)
                     if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
                         if norm_c not in global_code_map:
-                            global_code_map[norm_c] = (df_raw, r)
-                            
-        for c in range(num_cols):
-            txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
-            combined_headers.append(" ".join(txts))
+                            global_code_map[norm_c] = (df_raw, r, column_headers)
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
     input_code_col = df_input.columns[0]
     input_qty_col = df_input.columns[1]
 
+    # กำหนดคอลัมน์ที่ไม่ใช่คอลัมน์โครงการ (เช่น ข้อมูลทั่วไป, รหัส, รายละเอียด, ของใหม่, ของเก่า, ยอดรวม ฯลฯ)
+    # ช่วงคอลัมน์โครงการจะอยู่ระหว่างคอลัมน์ข้อมูลหลักกับคอลัมน์ Balance หรือคอลัมน์อื่นๆ ตามโครงสร้างไฟล์ของคุณ
     for _, row in df_input.iterrows():
         raw_code = str(row[input_code_col]).strip()
         norm_input = normalize_code(raw_code)
@@ -133,19 +140,30 @@ def process_order_and_get_summary(user_msg):
         
         match_data = global_code_map.get(norm_input)
         if match_data is not None:
-            df_target, target_row = match_data
+            df_target, target_row, headers = match_data
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
             new_val = clean_num(df_target.iloc[target_row, NEW_COL_INDEX])
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
+            # ดึงข้อมูลโครงการที่ติดจองจากคอลัมน์อื่นๆ (ตัวอย่างเช่น คอลัมน์ที่อยู่ระหว่าง OLD_COL_INDEX กับ BALANCE_COL_INDEX)
+            bookings = {}
+            for col_idx in range(OLD_COL_INDEX + 1, BALANCE_COL_INDEX):
+                val = clean_num(df_target.iloc[target_row, col_idx])
+                if val > 0:
+                    proj_name = headers.get(col_idx, f"Col_{col_idx}")
+                    # กรองเอาเฉพาะชื่อหัวข้อที่เป็นชื่อโครงการ (ตัดคำที่ไม่เกี่ยวข้องออกได้ตามต้องการ)
+                    if proj_name not in ["nan", "", "ยอดรวม", "Balance"]:
+                        bookings[proj_name] = int(val)
+
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
                 'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
                 'balance': int(balance),
                 'new': int(new_val) if new_val != 0 else "-",
-                'old': int(old_val) if old_val != 0 else "-"
+                'old': int(old_val) if old_val != 0 else "-",
+                'bookings': bookings
             })
         else:
             report_items.append({
@@ -154,7 +172,8 @@ def process_order_and_get_summary(user_msg):
                 'shortage': int(qty_needed),
                 'balance': "-",
                 'new': "-",
-                'old': "-"
+                'old': "-",
+                'bookings': {}
             })
 
     # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE จัดรูปแบบให้อ่านง่าย
@@ -165,11 +184,16 @@ def process_order_and_get_summary(user_msg):
         summary_text += f"- ขาด: {item['shortage']}\n"
         summary_text += f"- ของใหม่: {item['new']}\n"
         summary_text += f"- ของเก่า: {item['old']}\n"
+        
+        if item['bookings']:
+            summary_text += "- ติดจอง:\n"
+            for proj, qty in item['bookings'].items():
+                summary_text += f"  • {proj}: {qty}\n"
 
     # อัปเดตลงชีต Summary
     try:
-        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า"]
-        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage'], i['new'], i['old']] for i in report_items]
+        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า", "ติดจอง"]
+        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage'], i['new'], i['old'], str(i['bookings'])] for i in report_items]
         ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
         ws_summary.clear()
         ws_summary.update(table_data, 'A1')
