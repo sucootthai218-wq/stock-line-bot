@@ -97,8 +97,7 @@ def process_order_and_get_summary(user_msg):
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
-    # คำต้องห้ามที่ไม่ใช่ชื่อโครงการ
-    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "sum", "รวม", "dift", "maintenance", "refurbish", "ซ่อมบำรุง", "ส่งคืน", "ยืม"]
+    ignored_headers = ["maintenance", "refurbish", "safety", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "sum", "รวม", "dift", "ซ่อมบำรุง", "ส่งคืน", "ยืม", "no", "code"]
 
     for file_path in all_xlsx:
         excel_file_obj = pd.ExcelFile(file_path)
@@ -106,7 +105,7 @@ def process_order_and_get_summary(user_msg):
         df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
         num_cols = df_raw.shape[1]
         
-        # ค้นหาตำแหน่งคอลัมน์ "หักจอง" เพื่อใช้เป็นจุดตัดขอบเขต
+        # ค้นหาตำแหน่งคอลัมน์ "หักจอง" เพื่อใช้เป็นจุดตัดขอบเขตสุดท้าย
         hak_jong_col_limit = num_cols
         for c in range(num_cols):
             col_text = " ".join([str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]).lower()
@@ -148,25 +147,24 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            # สแกนหาชื่อโครงการเฉพาะคอลัมน์ก่อนถึงจุด "หักจอง"
+            # กรองและดึงเฉพาะคอลัมน์ที่เป็นชื่อโปรเจกต์จริงๆ (อยู่หลัง Balance และก่อนถึงจุด หักจอง)
             proj_bookings = {}
-            for c in range(ON_HAND_COL_INDEX + 1, limit_col):
+            for c in range(BALANCE_COL_INDEX + 1, limit_col):
                 header_texts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_target))) if pd.notna(df_target.iloc[r, c])]
-                h_joined = " ".join(header_texts)
+                h_joined = " ".join(header_texts).strip()
                 h_lower = h_joined.lower()
                 
-                # ข้ามคอลัมน์ที่เป็นคำต้องห้าม
-                if any(k in h_lower for k in excluded_kw):
+                # หากหัวตารางตรงกับคำต้องห้าม หรือเป็นช่องว่าง ให้ข้ามทันที
+                if not h_joined or any(ig in h_lower for ig in ignored_headers):
                     continue
                 
-                # ตรวจสอบว่าหัวตารางมีชื่อโปรเจกต์ชัดเจน (เช่น มีขีดกลาง หรือชื่อย่อโครงการ)
-                if h_joined:
-                    val_qty = clean_num(df_target.iloc[target_row, c])
-                    if val_qty > 0:
-                        pcode = h_joined.replace("\n", " ")
-                        if pcode not in proj_bookings:
-                            proj_bookings[pcode] = 0
-                        proj_bookings[pcode] += int(val_qty)
+                # ดึงเฉพาะหัวตารางที่มีตัวอักษรและตัวเลขผสมกัน หรือมีขีดกลาง (ลักษณะชื่อโปรเจกต์จริง)
+                val_qty = clean_num(df_target.iloc[target_row, c])
+                if val_qty > 0:
+                    clean_pname = h_joined.replace("\n", " ")
+                    if clean_pname not in proj_bookings:
+                        proj_bookings[clean_pname] = 0
+                    proj_bookings[clean_pname] += int(val_qty)
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
