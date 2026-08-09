@@ -30,16 +30,13 @@ FILE_IDS = [
 ]
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
-HEADER_ROW = 4
+HEADER_ROW = 4  # บรรทัดที่เป็นหัวตาราง (นับแบบ 0-indexed, แถวที่ 5 ใน Excel)
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
-NEW_COL_INDEX = 12
-OLD_COL_INDEX = 13
-BALANCE_COL_INDEX = 63
 
 def clean_num(val):
-    if pd.isna(val) or val is None: return 0.0
+    if val is None: return 0.0
     s = str(val).replace(',', '').strip()
     if s in ["-", "_", "", "nan", "None"]: return 0.0
     try: return float(s)
@@ -87,13 +84,30 @@ def process_order_and_get_summary(user_msg):
     all_xlsx = [f for f in glob.glob("stock_data_*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
-    # ใช้ openpyxl อ่านทีละแถวแบบไม่โหลดทั้งไฟล์เข้า RAM (แก้ปัญหา SIGKILL 100%)
     for file_path in all_xlsx:
         wb = load_workbook(filename=file_path, read_only=True, data_only=True)
         sheet = wb.active
         
-        for r, row in enumerate(sheet.iter_rows(values_only=True)):
-            if r > HEADER_ROW:
+        # ค้นหาตำแหน่งคอลัมน์ Balance / คงเหลือ จากบรรทัดหัวตารางอัตโนมัติ
+        balance_col_idx = None
+        rows_iter = sheet.iter_rows(values_only=True)
+        
+        for r_idx, row in enumerate(rows_iter):
+            if r_idx == HEADER_ROW:
+                for c_idx, cell_val in enumerate(row):
+                    if cell_val and any(kw in str(cell_val).lower() for kw in ['balance', 'stock', 'คงเหลือ', 'on hand']):
+                        balance_col_idx = c_idx
+                        break
+                break
+        
+        # ถ้าหาไม่เจอจากคีย์เวิร์ด ให้ใช้ค่าสำรอง (เช่น คอลัมน์ที่ 63 ตามเดิม)
+        if balance_col_idx is None:
+            balance_col_idx = 63
+
+        # อ่านข้อมูลสินค้าแต่ละแถว
+        sheet_reset = wb.active
+        for r_idx, row in enumerate(sheet_reset.iter_rows(values_only=True)):
+            if r_idx > HEADER_ROW:
                 for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
                     if col_idx < len(row) and row[col_idx] is not None:
                         c_val = row[col_idx]
@@ -102,7 +116,7 @@ def process_order_and_get_summary(user_msg):
                             if norm_c not in global_code_map:
                                 code_b = row[CODE_B_INDEX] if CODE_B_INDEX < len(row) else c_val
                                 desc = row[DESC_COL_INDEX] if DESC_COL_INDEX < len(row) else ""
-                                balance = row[BALANCE_COL_INDEX] if BALANCE_COL_INDEX < len(row) else 0.0
+                                balance = row[balance_col_idx] if balance_col_idx < len(row) else 0.0
                                 
                                 global_code_map[norm_c] = {
                                     'code': str(code_b),
@@ -140,13 +154,14 @@ def process_order_and_get_summary(user_msg):
                 'balance': "-"
             })
 
+    # แสดงผลเฉพาะรหัสสินค้า ตัดวงเล็บรายละเอียดออก
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
-        summary_text += f"- {item['code']} ({item['desc']}): คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
+        summary_text += f"- {item['code']}: คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
 
     header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
     table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
-    ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
+    ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worship(title="Summary", rows="100", cols="30") if hasattr(spreadsheet, 'add_worship') else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
     ws_summary.clear()
     ws_summary.update(table_data, 'A1')
 
