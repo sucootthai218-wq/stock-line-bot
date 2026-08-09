@@ -13,7 +13,6 @@ import pandas as pd
 import gdown
 
 app = Flask(__name__)
-
 # ดึงค่า LINE Token และ Secret จาก Environment Variables บน Render
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
@@ -64,7 +63,7 @@ def process_order_and_get_summary(user_msg):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
-    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order
+    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order (กรองเฉพาะบรรทัดที่เป็นรหัสสินค้า)
     ws_input = spreadsheet.worksheet("Input_Order")
     ws_input.clear()
     
@@ -72,10 +71,18 @@ def process_order_and_get_summary(user_msg):
     input_data = [["Code", "Qty"]]
     for line in lines:
         parts = line.strip().split()
-        if len(parts) >= 2:
-            input_data.append([parts[0], parts[1]])
-        elif len(parts) == 1:
-            input_data.append([parts[0], "1"])
+        if len(parts) >= 1:
+            raw_code = parts[0]
+            norm_c = normalize_code(raw_code)
+            # หากข้อความส่วนแรกไม่มีตัวอักษรภาษาอังกฤษหรือตัวเลข (เช่น เป็นข้อความภาษาไทยพูดคุย) ให้ข้าม
+            if not norm_c:
+                continue
+            qty = parts[1] if len(parts) >= 2 else "1"
+            input_data.append([raw_code, qty])
+
+    # ถ้าไม่มีรหัสสินค้าเลย ให้แจ้งเตือนกลับ
+    if len(input_data) <= 1:
+        return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบให้ถูกต้อง"
 
     ws_input.update(input_data, 'A1')
 
@@ -189,7 +196,7 @@ def process_order_and_get_summary(user_msg):
                 'shortage': int(qty_needed),
                 'on_hand': "-",
                 'balance': "-",
-                'new': "-",
+                'new": "-",
                 'old': "-",
                 'bookings': {}
             })
