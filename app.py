@@ -33,10 +33,10 @@ NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
 BALANCE_COL_INDEX = 63
 
-# --- กำหนดช่วงคอลัมน์โครงการที่นี่ ---
-PROJECT_START_COL = 37  
+# --- กำหนดช่วงคอลัมน์โครงการ ---
+PROJECT_START_COL = 14  
 PROJECT_END_COL = 62    
-# -----------------------------------
+# -----------------------------
 
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
@@ -64,7 +64,12 @@ def process_order_and_get_summary(user_msg):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
-    ws_input = spreadsheet.worksheet("Input_Order")
+    # จัดการชีต Input_Order
+    try:
+        ws_input = spreadsheet.worksheet("Input_Order")
+    except:
+        ws_input = spreadsheet.add_worksheet(title="Input_Order", rows="100", cols="10")
+    
     ws_input.clear()
     
     lines = user_msg.strip().split('\n')
@@ -75,7 +80,9 @@ def process_order_and_get_summary(user_msg):
         elif len(parts) == 1: input_data.append([parts[0], "1"])
     ws_input.update(input_data, 'A1')
 
-    for f in glob.glob("*.xlsx"): os.remove(f)
+    for f in glob.glob("*.xlsx"): 
+        try: os.remove(f)
+        except: pass
 
     drive_service = build('drive', 'v3', credentials=creds)
     query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
@@ -102,12 +109,10 @@ def process_order_and_get_summary(user_msg):
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
-    
-    invalid_keywords = ["nan", "ยอดรวม", "balance", "total", "weight", "onhand", "reserve", "maintenance", "broken", "safety", "refurbish"]
 
     for _, row in df_input.iterrows():
-        norm_input = normalize_code(str(row[df_input.columns[0]]))
-        qty_needed = clean_num(row[df_input.columns[1]])
+        norm_input = normalize_code(str(row.iloc[0]))
+        qty_needed = clean_num(row.iloc[1])
         
         if norm_input in global_code_map:
             df_target, target_row, headers = global_code_map[norm_input]
@@ -117,14 +122,18 @@ def process_order_and_get_summary(user_msg):
                 val = clean_num(df_target.iloc[target_row, col_idx])
                 if val > 0:
                     proj_name = str(headers.get(col_idx, "")).strip()
-                    if proj_name and not any(k in proj_name.lower() for k in invalid_keywords) and not proj_name.startswith("Col_"):
+                    # กรองเฉพาะชื่อโครงการที่มีความยาวไม่เกิน 4 ตัวอักษร/ตัวเลข (เช่น SKR1, ITA1, T008)
+                    if proj_name and re.match(r'^[A-Z0-9]{1,4}$', proj_name.upper()):
                         bookings[proj_name] = int(val)
+            
+            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
+            shortage = "มีของ" if qty_needed <= balance else int(qty_needed - balance)
             
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
                 'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
-                'shortage': "มีของ" if qty_needed <= clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) else int(qty_needed - clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])),
-                'balance': int(clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])),
+                'shortage': shortage,
+                'balance': int(balance),
                 'new': int(clean_num(df_target.iloc[target_row, NEW_COL_INDEX])),
                 'old': int(clean_num(df_target.iloc[target_row, OLD_COL_INDEX])),
                 'bookings': bookings
@@ -140,12 +149,20 @@ def process_order_and_get_summary(user_msg):
             for proj, qty in item['bookings'].items():
                 summary_text += f"  • {proj}: {qty}\n"
         
-        booking_str = ", ".join([f"{p}: {q}" for p, q in item['bookings'].items()])
+        booking_str = ", ".join([f"{p}: {q}" for p, q in item['bookings'].items()]) if item['bookings'] else "-"
         table_data.append([item['code'], item['desc'], item['balance'], item['shortage'], item['new'], item['old'], booking_str])
 
-    ws_summary = spreadsheet.worksheet("Summary")
-    ws_summary.clear()
-    ws_summary.update(table_data, 'A1')
+    # บันทึกข้อมูลลง Google Sheets (ชีต Summary)
+    try:
+        try:
+            ws_summary = spreadsheet.worksheet("Summary")
+        except:
+            ws_summary = spreadsheet.add_worksheet(title="Summary", rows="100", cols="10")
+            
+        ws_summary.clear()
+        ws_summary.update(table_data, 'A1')
+    except Exception as e:
+        print(f"Error updating Summary sheet: {e}")
 
     return summary_text
 
