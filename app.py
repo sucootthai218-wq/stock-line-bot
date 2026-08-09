@@ -50,24 +50,37 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    """ อ่านค่า JSON จาก Env Var และแก้ไขการขึ้นบรรทัดใหม่ใน Private Key ให้ถูกต้อง """
     google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
         creds_dict = json.loads(google_creds_json)
-        # แก้ไขปัญหาเครื่องหมาย \n ในรหัสลับที่มักเพี้ยนเวลาวางใน Render
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
-def run_stock_sync():
-    print("🔒 กำลังเชื่อมต่อกับ Google Sheets API...")
+def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
-    print("--- ตรวจสอบและดาวน์โหลดไฟล์จาก Google Drive ---")
+    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order (แยกบรรทัดหรือบันทึกตามรูปแบบที่คุณต้องการ)
+    ws_input = spreadsheet.worksheet("Input_Order")
+    ws_input.clear() # ล้างข้อมูลเก่าหรือจะใช้วิธี append ตามโครงสร้างเดิมของคุณ
+    
+    # แปลงข้อความที่พิมพ์มา (รองรับหลายบรรทัด) ใส่ลงตาราง
+    lines = user_msg.strip().split('\n')
+    input_data = [["Code", "Qty"]]
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            input_data.append([parts[0], parts[1]])
+        elif len(parts) == 1:
+            input_data.append([parts[0], "1"])
+
+    ws_input.update(input_data, 'A1')
+
+    # 2. รันระบบประมวลผลสต็อก (ดึงไฟล์และคำนวณ)
     existing_files = glob.glob("*.xlsx")
     if len(existing_files) < len(FILE_IDS):
         for file_id in FILE_IDS:
@@ -75,7 +88,6 @@ def run_stock_sync():
 
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
-    project_col_map = {}
     combined_headers = []
 
     for file_path in all_xlsx:
@@ -97,30 +109,12 @@ def run_stock_sync():
             txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
             combined_headers.append(" ".join(txts))
 
-    ws_input = spreadsheet.worksheet("Input_Order")
     df_input = pd.DataFrame(ws_input.get_all_records())
     excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "dift"]
 
-    sample_df = all_xlsx and pd.read_excel(all_xlsx[0], sheet_name=0, header=None, engine='openpyxl')
-    num_cols_sample = sample_df.shape[1] if sample_df is not None else 0
-
-    for c in range(num_cols_sample):
-        if c in [CODE_B_INDEX, CODE_C_INDEX, DESC_COL_INDEX, NEW_COL_INDEX, OLD_COL_INDEX, BALANCE_COL_INDEX]: continue
-        h_text = combined_headers[c].lower() if c < len(combined_headers) else ""
-        if any(k in h_text for k in excluded_kw): continue
-        
-        if c < len(combined_headers):
-            pcode_match = re.search(r'\b([A-Z0-9]{2,6})\b', combined_headers[c].upper())
-            if pcode_match:
-                pcode = pcode_match.group(1)
-                if pcode not in ["NEW", "OLD", "QTY", "KG", "TOTAL", "PO", "BROKEN", "REPAIR"]:
-                    if pcode not in project_col_map: project_col_map[pcode] = []
-                    project_col_map[pcode].append(c)
-
     report_items = []
-    found_count = 0
-    input_code_col = next((c for c in df_input.columns if "code" in str(c).lower() or "รหัส" in str(c)), df_input.columns[0])
-    input_qty_col = next((c for c in df_input.columns if "qty" in str(c).lower() or "จำนวน" in str(c)), df_input.columns[1])
+    input_code_col = df_input.columns[0]
+    input_qty_col = df_input.columns[1]
 
     for _, row in df_input.iterrows():
         raw_code = str(row[input_code_col]).strip()
@@ -129,7 +123,6 @@ def run_stock_sync():
         
         match_data = global_code_map.get(norm_input)
         if match_data is not None:
-            found_count += 1
             df_target, target_row = match_data
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
@@ -148,13 +141,19 @@ def run_stock_sync():
                 'balance': "-"
             })
 
+    # 3. สร้างข้อความสรุปผลส่งกลับไปที่หน้าจอ LINE ทันที
+    summary_text = "📊 รายงานสรุปสต็อก:\n"
+    for item in report_items:
+        summary_text += f"- {item['code']} ({item['desc']}): คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
+
+    # อัปเดตลงชีต Summary ด้วย
     header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
     table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
-
     ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
     ws_summary.clear()
     ws_summary.update(table_data, 'A1')
-    return found_count
+
+    return summary_text
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -169,14 +168,12 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
-    if user_msg in ["อัปเดตสต็อก", "sync"]:
-        try:
-            count = run_stock_sync()
-            reply_text = f"✅ อัปเดตข้อมูลสต็อกสำเร็จ! ประมวลผลสำเร็จ {count} รายการ"
-        except Exception as e:
-            reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
-    else:
-        reply_text = f"พิมพ์คำว่า 'อัปเดตสต็อก' เพื่อสั่งประมวลผลข้อมูลผ่านคลาวด์ได้เลยครับ"
+    
+    try:
+        # เมื่อพิมพ์ส่งข้อความใดๆ เข้ามา จะทำการประมวลผลและดึงสรุปยอดจากหน้า Summary ส่งกลับทันที
+        reply_text = process_order_and_get_summary(user_msg)
+    except Exception as e:
+        reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
