@@ -1,6 +1,7 @@
 import os
 import glob
 import re
+import json
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -19,7 +20,6 @@ LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-SERVICE_ACCOUNT_FILE = "credentials.json"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -49,10 +49,19 @@ def normalize_code(code_str):
     if not code_str: return ""
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
+def get_google_credentials():
+    """ รองรับการอ่านค่าทั้งจาก Environment Variable บน Render และไฟล์เครื่องคอม """
+    google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    if google_creds_json:
+        creds_dict = json.loads(google_creds_json)
+        return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    else:
+        return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+
 def run_stock_sync():
     """ ฟังก์ชันประมวลผลสต็อกตัวเดียวกับ main.py เดิมของคุณ """
     print("🔒 กำลังเชื่อมต่อกับ Google Sheets API...")
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    creds = get_google_credentials()
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
@@ -142,7 +151,6 @@ def run_stock_sync():
                 'balance': "-"
             })
 
-    active_projects = sorted(list({p for item in report_items for p in item.get('bookings', {}).keys()}))
     header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
     table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
 
@@ -170,7 +178,7 @@ def handle_message(event):
             count = run_stock_sync()
             reply_text = f"✅ อัปเดตข้อมูลสต็อกสำเร็จ! ประมวลผลสำเร็จ {count} รายการ"
         except Exception as e:
-            reply_text = f"❌ เกิดエラー: {str(e)}"
+            reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
     else:
         reply_text = f"พิมพ์คำว่า 'อัปเดตสต็อก' เพื่อสั่งประมวลผลข้อมูลผ่านคลาวด์ได้เลยครับ"
 
