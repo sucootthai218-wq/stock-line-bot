@@ -33,9 +33,6 @@ HEADER_ROW = 4
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
-NEW_COL_INDEX = 12
-OLD_COL_INDEX = 13
-BALANCE_COL_INDEX = 63
 
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
@@ -84,12 +81,10 @@ def process_order_and_get_summary(user_msg):
 
     ws_input.update(input_data, 'A1')
 
-    # ลบไฟล์เก่าทิ้ง
     for f in glob.glob("*.xlsx"):
         try: os.remove(f)
         except: pass
 
-    # ดึง 2 ไฟล์ล่าสุดจากโฟลเดอร์ My Stock
     file_ids = get_latest_file_ids_from_folder(creds, DRIVE_FOLDER_ID, count=2)
     if not file_ids:
         return "❌ ไม่พบไฟล์ Excel ในโฟลเดอร์ My Stock"
@@ -99,9 +94,7 @@ def process_order_and_get_summary(user_msg):
 
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
-    combined_headers = []
 
-    # ปรับมาใช้อ่านแบบประหยัด RAM สูงสุด แต่โครงสร้าง df_raw ยังใช้งานได้เหมือนเดิม
     for file_path in all_xlsx:
         wb = load_workbook(filename=file_path, read_only=True, data_only=True)
         sheet = wb.active
@@ -111,6 +104,21 @@ def process_order_and_get_summary(user_msg):
         df_raw = pd.DataFrame(rows)
         num_cols = df_raw.shape[1]
         
+        # ค้นหาคอลัมน์ที่เป็น Balance อัตโนมัติจากบรรทัดหัวตาราง (HEADER_ROW ถึง HEADER_ROW+2)
+        balance_col_idx = None
+        for r_h in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))):
+            for c_h in range(num_cols):
+                val_h = str(df_raw.iloc[r_h, c_h]).strip().lower()
+                if any(kw in val_h for kw in ["balance", "on hand", "stock", "Remain", "คงเหลือ"]):
+                    balance_col_idx = c_h
+                    break
+            if balance_col_idx is not None:
+                break
+        
+        # ถ้าหาไม่เจอ ให้ใช้ค่าเริ่มต้นสำรองเป็นคอลัมน์ท้ายๆ หรือคอลัมน์ 63
+        if balance_col_idx is None:
+            balance_col_idx = 63 if num_cols > 63 else num_cols - 1
+
         for r in range(HEADER_ROW + 1, len(df_raw)):
             for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
                 c_val = df_raw.iloc[r, col_idx] if col_idx < num_cols else None
@@ -118,11 +126,14 @@ def process_order_and_get_summary(user_msg):
                     norm_c = normalize_code(c_val)
                     if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
                         if norm_c not in global_code_map:
-                            global_code_map[norm_c] = (df_raw, r)
-                            
-        for c in range(num_cols):
-            txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if r < len(df_raw) and pd.notna(df_raw.iloc[r, c])]
-            combined_headers.append(" ".join(txts))
+                            balance_val = clean_num(df_raw.iloc[r, balance_col_idx] if balance_col_idx < num_cols else 0)
+                            global_code_map[norm_c] = {
+                                'df': df_raw,
+                                'row': r,
+                                'balance': balance_val,
+                                'b_idx': CODE_B_INDEX,
+                                'desc_idx': DESC_COL_INDEX
+                            }
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
@@ -136,12 +147,13 @@ def process_order_and_get_summary(user_msg):
         
         match_data = global_code_map.get(norm_input)
         if match_data is not None:
-            df_target, target_row = match_data
-            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX] if BALANCE_COL_INDEX < df_target.shape[1] else 0)
+            df_target = match_data['df']
+            target_row = match_data['row']
+            balance = match_data['balance']
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            b_val = df_target.iloc[target_row, CODE_B_INDEX] if CODE_B_INDEX < df_target.shape[1] else raw_code
-            desc_val = df_target.iloc[target_row, DESC_COL_INDEX] if DESC_COL_INDEX < df_target.shape[1] else ""
+            b_val = df_target.iloc[target_row, match_data['b_idx']] if match_data['b_idx'] < df_target.shape[1] else raw_code
+            desc_val = df_target.iloc[target_row, match_data['desc_idx']] if match_data['desc_idx'] < df_target.shape[1] else ""
 
             report_items.append({
                 'code': str(b_val), 
