@@ -11,7 +11,6 @@ from googleapiclient.discovery import build
 import gspread
 import pandas as pd
 import gdown
-from openpyxl import load_workbook
 
 app = Flask(__name__)
 
@@ -26,6 +25,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# ใช้ ID โฟลเดอร์ My Stock เพื่อดึงไฟล์ล่าสุดอัตโนมัติ (แก้ปัญหาไฟล์เปลี่ยนชื่อหรือตัว ID เปลี่ยน)
 DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
@@ -33,6 +33,8 @@ HEADER_ROW = 4
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
+NEW_COL_INDEX = 12
+OLD_COL_INDEX = 13
 
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
@@ -56,6 +58,7 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def get_latest_file_ids_from_folder(creds, folder_id, count=2):
+    """ ดึงเฉพาะ File ID ของไฟล์ Excel 2 ไฟล์ล่าสุดจากโฟลเดอร์ My Stock อัตโนมัติ """
     service = build('drive', 'v3', credentials=creds)
     query = f"'{folder_id}' in parents and (mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='application/vnd.ms-excel') and trashed=false"
     results = service.files().list(q=query, orderBy="modifiedTime desc", pageSize=count, fields="files(id, name)").execute()
@@ -81,7 +84,7 @@ def process_order_and_get_summary(user_msg):
 
     ws_input.update(input_data, 'A1')
 
-    # ลบไฟล์เก่าทิ้ง
+    # ลบไฟล์ Excel เก่าทิ้งก่อน เพื่อดึงชุดใหม่ล่าสุดจากโฟลเดอร์เสมอ
     for f in glob.glob("*.xlsx"):
         try: os.remove(f)
         except: pass
@@ -95,42 +98,41 @@ def process_order_and_get_summary(user_msg):
 
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
+    combined_headers = []
 
-    # อ่านแบบประหยัดแรมสูงสุด ไม่โหลดใส่ DataFrame ทั้งเล่ม
     for file_path in all_xlsx:
-        wb = load_workbook(filename=file_path, read_only=True, data_only=True)
-        sheet = wb.active
+        excel_file_obj = pd.ExcelFile(file_path)
+        sheet_name = excel_file_obj.sheet_names[0]
+        df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
+        num_cols = df_raw.shape[1]
         
+        # ค้นหาคอลัมน์ที่เป็น Balance อัตโนมัติจากบรรทัดหัวตาราง (ป้องกันปัญหาคอลัมน์ขยับ)
         balance_col_idx = None
-        for r_idx, row in enumerate(sheet.iter_rows(values_only=True)):
-            # ค้นหาตำแหน่งคอลัมน์ Balance อัตโนมัติจากหัวตาราง
-            if r_idx >= HEADER_ROW and r_idx <= HEADER_ROW + 2 and balance_col_idx is None:
-                for c_h, val_h in enumerate(row):
-                    if val_h and any(kw in str(val_h).lower() for kw in ["balance", "on hand", "stock", "remain", "คงเหลือ"]):
-                        balance_col_idx = c_h
-                        break
-            
-            if balance_col_idx is None and r_idx == HEADER_ROW + 2:
-                balance_col_idx = 63 # ค่าสำรองเริ่มต้น
+        for r_h in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))):
+            for c_h in range(num_cols):
+                val_h = str(df_raw.iloc[r_h, c_h]).strip().lower()
+                if any(kw in val_h for kw in ["balance", "on hand", "stock", "remain", "คงเหลือ"]):
+                    balance_col_idx = c_h
+                    break
+            if balance_col_idx is not None:
+                break
+        
+        # ถ้าหาคำไม่เจอ ให้ใช้ค่าเริ่มต้นสำรองเป็นคอลัมน์ที่ 63
+        if balance_col_idx is None:
+            balance_col_idx = 63 if num_cols > 63 else num_cols - 1
 
-            # อ่านข้อมูลสินค้าเฉพาะแถวหลังหัวตาราง
-            if r_idx > HEADER_ROW:
-                for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
-                    if col_idx < len(row) and row[col_idx] is not None:
-                        c_val = row[col_idx]
-                        norm_c = normalize_code(c_val)
-                        if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
-                            if norm_c not in global_code_map:
-                                balance_val = clean_num(row[balance_col_idx]) if balance_col_idx is not None and balance_col_idx < len(row) else 0.0
-                                desc_val = row[DESC_COL_INDEX] if DESC_COL_INDEX < len(row) else ""
-                                code_b_val = row[CODE_B_INDEX] if CODE_B_INDEX < len(row) else c_val
-                                
-                                global_code_map[norm_c] = {
-                                    'code': str(code_b_val),
-                                    'desc': str(desc_val),
-                                    'balance': balance_val
-                                }
-        wb.close()
+        for r in range(HEADER_ROW + 1, len(df_raw)):
+            for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
+                c_val = df_raw.iloc[r, col_idx] if col_idx < num_cols else None
+                if pd.notna(c_val):
+                    norm_c = normalize_code(c_val)
+                    if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
+                        if norm_c not in global_code_map:
+                            global_code_map[norm_c] = (df_raw, r, balance_col_idx)
+                            
+        for c in range(num_cols):
+            txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
+            combined_headers.append(" ".join(txts))
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
@@ -142,14 +144,15 @@ def process_order_and_get_summary(user_msg):
         norm_input = normalize_code(raw_code)
         qty_needed = clean_num(row[input_qty_col])
         
-        data = global_code_map.get(norm_input)
-        if data is not None:
-            balance = data['balance']
+        match_data = global_code_map.get(norm_input)
+        if match_data is not None:
+            df_target, target_row, bal_col = match_data
+            balance = clean_num(df_target.iloc[target_row, bal_col])
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             report_items.append({
-                'code': data['code'], 
-                'desc': data['desc'],
+                'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
+                'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
                 'balance': int(balance)
             })
