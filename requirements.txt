@@ -1,0 +1,9 @@
+gspread
+pandas
+openpyxl
+gdown
+google-auth
+flask
+gunicorn
+line-bot-sdk
+requests
