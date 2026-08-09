@@ -14,13 +14,17 @@ import gdown
 
 app = Flask(__name__)
 
+# ดึงค่า LINE Token และ Secret จาก Environment Variables บน Render
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 FILE_IDS = [
     "1M7YJzGsNRTSQswyxdHHiDDXAuX1h7U4a",
@@ -62,36 +66,36 @@ def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
-
-    # 1. จัดการชีต Input_Order (รับข้อความจาก LINE มาใส่ชีต)
+    
+    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order
     try:
         ws_input = spreadsheet.worksheet("Input_Order")
     except:
         ws_input = spreadsheet.add_worksheet(title="Input_Order", rows="100", cols="10")
-    
+        
     ws_input.clear()
     
     lines = user_msg.strip().split('\n')
     input_data = [["Code", "Qty"]]
     for line in lines:
         parts = line.strip().split()
-        if len(parts) >= 2: input_data.append([parts[0], parts[1]])
-        elif len(parts) == 1: input_data.append([parts[0], "1"])
+        if len(parts) >= 2:
+            input_data.append([parts[0], parts[1]])
+        elif len(parts) == 1:
+            input_data.append([parts[0], "1"])
     ws_input.update(input_data, 'A1')
 
-    # 2. ดาวน์โหลดไฟล์จาก Google Drive
+    # 2. รันระบบประมวลผลสต็อก (ดึงไฟล์และคำนวณ)
     existing_files = glob.glob("*.xlsx")
     if len(existing_files) < len(FILE_IDS):
-        for f in glob.glob("*.xlsx"): 
+        for f in glob.glob("*.xlsx"):
             try: os.remove(f)
             except: pass
-        drive_service = build('drive', 'v3', credentials=creds)
         for file_id in FILE_IDS:
             gdown.download(id=file_id, output=f"{file_id}.xlsx", quiet=True)
-
-    # 3. อ่านและรวมฐานข้อมูลจากไฟล์ Excel ทั้งหมด
+            
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
-
+    
     global_code_map = {} 
     project_col_map = {}
     combined_headers = []
@@ -99,7 +103,6 @@ def process_order_and_get_summary(user_msg):
     for file_path in all_xlsx:
         excel_file_obj = pd.ExcelFile(file_path)
         sheet_name = excel_file_obj.sheet_names[0]
-        
         df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
         num_cols = df_raw.shape[1]
         
@@ -116,7 +119,6 @@ def process_order_and_get_summary(user_msg):
             txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
             combined_headers.append(" ".join(txts))
 
-    # 4. โหลดข้อมูล Input_Order มาประมวลผลคำนวณ
     df_input = pd.DataFrame(ws_input.get_all_records())
     excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "dift"]
 
@@ -153,8 +155,7 @@ def process_order_and_get_summary(user_msg):
             old_qty = clean_num(df_target.iloc[target_row, OLD_COL_INDEX])
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX])
             
-            # เงื่อนไขช่องขาด: ถ้า balance น้อยกว่า 0 หรือไม่พอ ให้ใช้จำนวนที่สั่งมาเดิม
-            shortage = "มีของ" if balance >= qty_needed else int(qty_needed)
+            shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             proj_bookings = {p: int(sum(clean_num(df_target.iloc[target_row, c]) for c in cols)) 
                              for p, cols in project_col_map.items() if sum(clean_num(df_target.iloc[target_row, c]) for c in cols) != 0}
@@ -162,62 +163,70 @@ def process_order_and_get_summary(user_msg):
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
                 'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
-                'new': int(new_qty), 
-                'old': int(old_qty), 
-                'balance': int(balance), 
-                'shortage': shortage,
+                'new': int(new_qty),
+                'old': int(old_qty),
+                'on_hand': int(new_qty + old_qty),
+                'balance': int(balance),
+                'shortage': "มีของ" if shortage == 0 else int(shortage),
                 'bookings': proj_bookings
             })
         else:
             report_items.append({
                 'code': raw_code, 
-                'desc': "⚠️ ไม่พบรหัสนี้ในไฟล์ Stock",
-                'new': "-", 
-                'old': "-", 
-                'balance': "-", 
-                'shortage': int(qty_needed), 
+                'desc': "⚠️ ไม่พบรหัส",
+                'new': "-",
+                'old': "-",
+                'on_hand': "-",
+                'balance': "-",
+                'shortage': int(qty_needed),
                 'bookings': {}
             })
 
-    # 5. สร้างข้อความตอบกลับ LINE และอัปเดตลง Google Sheets (ชีต Summary)
+    # 3. สร้างข้อความสรุปผลส่งกลับไปที่หน้าจอ LINE และอัปเดตชีต Summary
     summary_text = "📊 รายงานสรุปสต็อก:\n"
-    active_projects = sorted(list({p for item in report_items for p in item['bookings'].keys()}))
-    header = ["รหัสสินค้า", "รายการ", "New", "Old", "สต็อก Balance", "ขาด"] + active_projects
-    table_data = [header]
-
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n- สต็อกรวม: {item['balance']}\n- ขาด: {item['shortage']}\n- ของใหม่: {item['new']}\n- ของเก่า: {item['old']}\n"
-        
         if item['bookings']:
             summary_text += "- ติดจอง:\n"
             for p, q in item['bookings'].items():
                 summary_text += f"  • {p}: {q}\n"
 
-        table_data.append([item['code'], item['desc'], item['new'], item['old'], item['balance'], item['shortage']] + 
-                          [item['bookings'].get(p, "-") for p in active_projects])
+    active_projects = sorted(list({p for item in report_items for p in item['bookings'].keys()}))
+    header = ["รหัสสินค้า", "รายการ", "New", "Old", "On Hand", "สต็อก Balance", "ขาด"] + active_projects
+    table_data = [header] + [
+        [i['code'], i['desc'], i['new'], i['old'], i['on_hand'], i['balance'], i['shortage']] + 
+        [i['bookings'].get(p, "-") for p in active_projects] 
+        for i in report_items
+    ]
 
     try:
         ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
         ws_summary.clear()
         ws_summary.update(table_data, 'A1')
     except Exception as e:
-        print(f"Error updating Summary sheet: {e}")
+        print(f"Error updating Summary: {e}")
 
     return summary_text
 
 @app.route("/callback", methods=['POST'])
 def callback():
+    signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
-    try: 
-        handler.handle(body, request.headers['X-Line-Signature'])
-    except: 
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
         abort(400)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    reply_text = process_order_and_get_summary(event.message.text)
+    user_msg = event.message.text.strip()
+    try:
+        reply_text = process_order_and_get_summary(user_msg)
+    except Exception as e:
+        reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
