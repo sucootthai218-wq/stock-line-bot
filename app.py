@@ -7,6 +7,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 import gspread
 import pandas as pd
 import gdown
@@ -24,10 +25,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-FILE_IDS = [
-    "1M7YJzGsNRTSQswyxdHHiDDXAuX1h7U4a",
-    "1HwUNEZ1wwwne2-ZG0ogluODTdmAAdTSg",
-]
+
+# ใช้ Folder ID ของ Google Drive ที่คุณส่งมา
+DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
 HEADER_ROW = 4
@@ -64,11 +64,10 @@ def process_order_and_get_summary(user_msg):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
-    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order (แยกบรรทัดหรือบันทึกตามรูปแบบที่คุณต้องการ)
+    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order
     ws_input = spreadsheet.worksheet("Input_Order")
-    ws_input.clear() # ล้างข้อมูลเก่าหรือจะใช้วิธี append ตามโครงสร้างเดิมของคุณ
+    ws_input.clear()
     
-    # แปลงข้อความที่พิมพ์มา (รองรับหลายบรรทัด) ใส่ลงตาราง
     lines = user_msg.strip().split('\n')
     input_data = [["Code", "Qty"]]
     for line in lines:
@@ -80,12 +79,25 @@ def process_order_and_get_summary(user_msg):
 
     ws_input.update(input_data, 'A1')
 
-    # 2. รันระบบประมวลผลสต็อก (ดึงไฟล์และคำนวณ)
-    existing_files = glob.glob("*.xlsx")
-    if len(existing_files) < len(FILE_IDS):
-        for file_id in FILE_IDS:
-            gdown.download(id=file_id, quiet=False)
+    # 2. ล้างไฟล์ Excel เก่าในเซิร์ฟเวอร์ทิ้งก่อนทุกครั้ง เพื่อป้องกันการใช้ข้อมูลเก่า
+    for f in glob.glob("*.xlsx"):
+        try:
+            os.remove(f)
+        except:
+            pass
 
+    # 3. ค้นหาและดาวน์โหลดไฟล์ .xlsx ทั้งหมดจาก Google Drive Folder อัตโนมัติ
+    drive_service = build('drive', 'v3', credentials=creds)
+    query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
+    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    files = results.get('files', [])
+
+    for file in files:
+        file_id = file['id']
+        file_name = file['name']
+        gdown.download(id=file_id, output=file_name, quiet=False)
+
+    # 4. ประมวลผลไฟล์ Excel ที่อยู่ในโฟลเดอร์
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
     combined_headers = []
@@ -110,8 +122,6 @@ def process_order_and_get_summary(user_msg):
             combined_headers.append(" ".join(txts))
 
     df_input = pd.DataFrame(ws_input.get_all_records())
-    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "dift"]
-
     report_items = []
     input_code_col = df_input.columns[0]
     input_qty_col = df_input.columns[1]
@@ -141,17 +151,20 @@ def process_order_and_get_summary(user_msg):
                 'balance': "-"
             })
 
-    # 3. สร้างข้อความสรุปผลส่งกลับไปที่หน้าจอ LINE ทันที
+    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"- {item['code']} ({item['desc']}): คงเหลือ {item['balance']} | ขาด {item['shortage']}\n"
 
-    # อัปเดตลงชีต Summary ด้วย
-    header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
-    table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
-    ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
-    ws_summary.clear()
-    ws_summary.update(table_data, 'A1')
+    # อัปเดตลงชีต Summary
+    try:
+        header = ["รหัสสินค้า", "รายการ", "สต็อก Balance", "ขาด"]
+        table_data = [header] + [[i['code'], i['desc'], i['balance'], i['shortage']] for i in report_items]
+        ws_summary = spreadsheet.worksheet("Summary") if "Summary" in [w.title for w in spreadsheet.worksheets()] else spreadsheet.add_worksheet(title="Summary", rows="100", cols="30")
+        ws_summary.clear()
+        ws_summary.update(table_data, 'A1')
+    except Exception as e:
+        print(f"Warning: Could not update Summary sheet: {e}")
 
     return summary_text
 
@@ -168,9 +181,7 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
-    
     try:
-        # เมื่อพิมพ์ส่งข้อความใดๆ เข้ามา จะทำการประมวลผลและดึงสรุปยอดจากหน้า Summary ส่งกลับทันที
         reply_text = process_order_and_get_summary(user_msg)
     except Exception as e:
         reply_text = f"❌ เกิดข้อผิดพลาด: {str(e)}"
