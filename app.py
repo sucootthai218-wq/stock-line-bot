@@ -97,7 +97,8 @@ def process_order_and_get_summary(user_msg):
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
-    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "sum", "รวม", "dift"]
+    # คำต้องห้ามที่ไม่ใช่ชื่อโครงการ
+    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "sum", "รวม", "dift", "maintenance", "refurbish", "ซ่อมบำรุง", "ส่งคืน", "ยืม"]
 
     for file_path in all_xlsx:
         excel_file_obj = pd.ExcelFile(file_path)
@@ -105,7 +106,7 @@ def process_order_and_get_summary(user_msg):
         df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine='openpyxl')
         num_cols = df_raw.shape[1]
         
-        # ค้นหาตำแหน่งคอลัมน์ "หักจอง" เพื่อใช้เป็นจุดตัด (จะไม่ค้นหาข้อมูลโปรเจกต์ที่อยู่หลังคอลัมน์นี้)
+        # ค้นหาตำแหน่งคอลัมน์ "หักจอง" เพื่อใช้เป็นจุดตัดขอบเขต
         hak_jong_col_limit = num_cols
         for c in range(num_cols):
             col_text = " ".join([str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]).lower()
@@ -122,7 +123,6 @@ def process_order_and_get_summary(user_msg):
                         norm_c = normalize_code(c_val)
                         if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
                             if norm_c not in global_code_map:
-                                # เก็บข้อมูลตาราง, แถว และขีดจำกัดคอลัมน์หักจองของไฟล์นี้ไว้ด้วย
                                 global_code_map[norm_c] = (df_raw, r, hak_jong_col_limit)
 
     df_input = pd.DataFrame(ws_input.get_all_records())
@@ -148,28 +148,25 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            # สแกนหาชื่อโครงการและยอดจองเฉพาะคอลัมน์ที่อยู่ "ก่อนถึง" คอลัมน์หักจองเท่านั้น
+            # สแกนหาชื่อโครงการเฉพาะคอลัมน์ก่อนถึงจุด "หักจอง"
             proj_bookings = {}
-            for c in range(limit_col):
-                # ดึงหัวตารางเพื่อแกะชื่อโครงการ
+            for c in range(ON_HAND_COL_INDEX + 1, limit_col):
                 header_texts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 h_joined = " ".join(header_texts)
                 h_lower = h_joined.lower()
                 
+                # ข้ามคอลัมน์ที่เป็นคำต้องห้าม
                 if any(k in h_lower for k in excluded_kw):
                     continue
                 
-                # ค้นหารหัสหรือชื่อโปรเจกต์จากหัวตาราง
-                pcode_match = re.search(r'\b([A-Z0-9\-]{2,15})\b', h_joined.upper())
-                if pcode_match:
-                    pcode = pcode_match.group(1)
-                    if pcode not in ["NEW", "OLD", "QTY", "KG", "TOTAL", "SUM", "PO", "BROKEN", "REPAIR"]:
-                        val_qty = clean_num(df_target.iloc[target_row, c])
-                        if val_qty > 0:
-                            # ถ้าเจอชื่อโปรเจกต์ซ้ำ ให้บวกยอดรวมของโปรเจกต์นั้นๆ เข้าด้วยกัน
-                            if pcode not in proj_bookings:
-                                proj_bookings[pcode] = 0
-                            proj_bookings[pcode] += int(val_qty)
+                # ตรวจสอบว่าหัวตารางมีชื่อโปรเจกต์ชัดเจน (เช่น มีขีดกลาง หรือชื่อย่อโครงการ)
+                if h_joined:
+                    val_qty = clean_num(df_target.iloc[target_row, c])
+                    if val_qty > 0:
+                        pcode = h_joined.replace("\n", " ")
+                        if pcode not in proj_bookings:
+                            proj_bookings[pcode] = 0
+                        proj_bookings[pcode] += int(val_qty)
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
