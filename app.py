@@ -35,7 +35,7 @@ CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
-ON_HAND_COL_INDEX = 62   # สมมติฐานตำแหน่ง On hand อยู่ก่อน Balance (ปรับเลขอ้างอิงตามโครงสร้างจริงของคุณ)
+ON_HAND_COL_INDEX = 62   
 BALANCE_COL_INDEX = 63
 
 def clean_num(val):
@@ -126,7 +126,6 @@ def process_order_and_get_summary(user_msg):
             h_joined = " ".join(txts)
             combined_headers.append(h_joined)
             
-            # ค้นหาคอลัมน์ที่เป็นรหัสโครงการ (กรองคำว่า total, sum, รวม ออกเพื่อไม่ให้ดึงตัวเลขยอดรวมมาปน)
             h_lower = h_joined.lower()
             if not any(k in h_lower for k in excluded_kw):
                 pcode_match = re.search(r'\b([A-Z0-9]{2,6})\b', h_joined.upper())
@@ -161,14 +160,16 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            # ตรวจสอบความสมเหตุสมผลยอดติดจอง: กรองและรวมเฉพาะค่าที่มีตัวตนจริง และตรวจสอบไม่ให้ยอดจองสูงเกินขอบเขต On hand + Balance (ถ้าเกินความจริงมากๆ ให้ตัดทิ้งหรือข้ามเพื่อป้องกันค่าขยะจากคอลัมน์ยอดรวม)
-            max_possible_pool = max(0, on_hand_val) + abs(balance) # ขอบเขตเพดานสูงสุดเพื่อกรองค่าที่ไม่สมเหตุสมผล
+            # คำนวณเพดานสูงสุดที่เป็นไปได้ตามหลัก On hand + Balance (ป้องกันตัวเลขบวกทบหลุดสเกล)
+            max_limit = max(0, on_hand_val) + abs(balance)
             
             proj_bookings = {}
             for p, cols in project_col_map.items():
                 p_sum = sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1])
-                # เงื่อนไขความสมเหตุสมผล: ยอดจองต่อโครงการต้องไม่สูงเกินขีดจำกัดตรรกะสต็อกรวม และต้องไม่เป็น 0
-                if p_sum != 0:
+                if p_sum > 0:
+                    # ถ้าค่าที่ดึงมาดูสูงเกินเพดานความเป็นจริง ให้ทำการจำกัดหรือตัดทอนลงมาสมเหตุสมผล
+                    if max_limit > 0 and p_sum > max_limit:
+                        p_sum = max_limit
                     proj_bookings[p] = int(p_sum)
 
             report_items.append({
@@ -193,7 +194,7 @@ def process_order_and_get_summary(user_msg):
                 'bookings': {}
             })
 
-    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE แสดง On hand และ สต็อก balance พร้อมรายการติดจอง
+    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
