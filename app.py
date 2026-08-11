@@ -105,10 +105,13 @@ def process_order_and_get_summary(user_msg):
     # 4. ประมวลผลไฟล์ Excel ที่อยู่ในโฟลเดอร์
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
-    project_col_map = {}
-    combined_headers = []
 
-    excluded_kw = ["no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", "total", "sum", "รวม", "dift"]
+    # คำค้นหาที่ห้ามนำมานับเป็นชื่อโครงการ (เพื่อตัดคอลัมน์สรุปยอดออก)
+    excluded_kw = [
+        "no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", 
+        "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", 
+        "total", "sum", "รวม", "dift", "maintenance", "import", "pending", "update"
+    ]
 
     for file_path in all_xlsx:
         excel_file_obj = pd.ExcelFile(file_path)
@@ -125,26 +128,6 @@ def process_order_and_get_summary(user_msg):
                         if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE", "รหัสสินค้า", "รหัส", "NO"]:
                             if norm_c not in global_code_map:
                                 global_code_map[norm_c] = (df_raw, r)
-                            
-        for c in range(num_cols):
-            # ดึงหัวตาราง 3 แถวบนมารวมกันเพื่อวิเคราะห์หาชื่อโปรเจกต์
-            txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
-            h_joined = " ".join(txts)
-            combined_headers.append(h_joined)
-            
-            h_lower = h_joined.lower()
-            if not any(k in h_lower for k in excluded_kw):
-                pcode_match = re.search(r'\b([A-Z0-9]{2,6})\b', h_joined.upper())
-                if pcode_match:
-                    pcode = pcode_match.group(1)
-                    if pcode not in ["NEW", "OLD", "QTY", "KG", "TOTAL", "SUM", "PO", "BROKEN", "REPAIR"]:
-                        if pcode not in project_col_map:
-                            project_col_map[pcode] = []
-                        
-                        # [จุดปรับปรุง] เลือกเก็บเฉพาะคอลัมน์ที่ตรงกับช่องจำนวน (เช่น มีคำว่า QTY หรือ อยู่ในคอลัมน์ฝั่งจำนวนหลัก)
-                        # เพื่อป้องกันไม่ให้ดึงคอลัมน์ย่อยอื่นๆ ของโปรเจกต์เดียวกันมาบวกซ้ำซ้อน
-                        if c not in project_col_map[pcode]:
-                            project_col_map[pcode].append(c)
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
@@ -169,19 +152,23 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            max_limit = max(0, on_hand_val) + abs(balance)
-            
+            # ค้นหาข้อมูลการจองเฉพาะคอลัมน์ทางขวาที่เป็นข้อมูลโครงการ (ตั้งแต่คอลัมน์หลัง BALANCE_COL_INDEX เป็นต้นไป)
             proj_bookings = {}
-            for p, cols in project_col_map.items():
-                # [จุดปรับปรุง] กรองเอาเฉพาะค่าที่มีตัวเลขมากกว่า 0 และเลือกคอลัมน์ที่เป็นตัวแทนหลักของโปรเจกต์นั้นๆ จริงๆ
-                valid_vals = [clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1]]
-                if valid_vals:
-                    # ใช้ค่าสูงสุดหรือค่าที่ไม่เป็นศูนย์ในกลุ่มคอลัมน์ของโปรเจกต์นั้น เพื่อเลี่ยงการดึงคอลัมน์ย่อยมารวมกันผิดพลาด
-                    p_sum = max(valid_vals) if max(valid_vals) > 0 else 0
-                    if p_sum > 0:
-                        if max_limit > 0 and p_sum > max_limit:
-                            p_sum = max_limit
-                        proj_bookings[p] = int(p_sum)
+            num_cols = df_target.shape[1]
+            start_search_col = max(BALANCE_COL_INDEX + 1, 64) # เริ่มมองหาจากคอลัมน์หลังสต็อกคงเหลือ
+            
+            for c in range(start_search_col, num_cols):
+                val = clean_num(df_target.iloc[target_row, c])
+                # ถ้าช่องนี้มีจำนวนมากกว่า 0 แสดงว่ามีการจอง/เบิกของจริง
+                if val > 0:
+                    # ดึงข้อความจากหัวตารางในคอลัมน์นี้ (แถว HEADER_ROW ถึง HEADER_ROW + 3) มาประกอบกันเป็นชื่อโครงการ
+                    txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target))) if pd.notna(df_target.iloc[r, c])]
+                    proj_name = " ".join(txts)
+                    
+                    # ตรวจสอบว่าชื่อหัวตารางไม่ใช่คำต้องห้าม (เช่น ไม่ใช่ช่องว่างหรือคำอธิบายทั่วไป)
+                    proj_lower = proj_name.lower()
+                    if proj_name and not any(k in proj_lower for k in excluded_kw):
+                        proj_bookings[proj_name] = int(val)
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
@@ -219,6 +206,8 @@ def process_order_and_get_summary(user_msg):
             summary_text += "- ติดจอง:\n"
             for p, q in item['bookings'].items():
                 summary_text += f"  • {p}: {q}\n"
+        else:
+            summary_text += "- ติดจอง: -\n"
 
     # อัปเดตลงชีต Summary ใน Google Sheets
     try:
