@@ -155,25 +155,26 @@ def process_order_and_get_summary(user_msg):
             num_cols = df_target.shape[1]
             start_search_col = max(BALANCE_COL_INDEX + 1, 64)
             
-            # กวาดหาคอลัมน์โปรเจกต์
-            c = start_search_col
-            while c < num_cols:
+            # วนลูปเช็คทีละคอลัมน์ทางขวา
+            for c in range(start_search_col, num_cols):
+                # ดึงข้อความหัวตารางจากแถวบนๆ (เช่น แถว 4 ถึง 6)
                 txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 header_block_str = " ".join(txts).lower()
                 
+                # ถ้าเจอคำว่า "หักจอง" หรือยอดสรุป ให้หยุดกวาดทันที
                 if "หักจอง" in header_block_str or "ยอดรวม" in header_block_str or "total" in header_block_str:
                     break
                 
-                val = clean_num(df_target.iloc[target_row, c])
-                proj_name = " ".join([t for t in txts if t and t.lower() not in ["nan", "none", "c", "e"]])
+                # กรองคำที่ไม่ใช่ชื่อโครงการออก
+                valid_texts = [t for t in txts if t and t.lower() not in ["nan", "none", "c", "e", "จอง", "เวลา", "ใช้"]]
+                proj_name = " ".join(valid_texts)
                 proj_lower = proj_name.lower()
                 
+                # ถ้าเป็นชื่อโครงการที่ถูกต้อง (ไม่มีคำต้องห้าม และมีความยาวพอสมควร)
                 if proj_name and not any(k in proj_lower for k in excluded_kw):
+                    val = clean_num(df_target.iloc[target_row, c])
                     if val > 0:
                         proj_bookings[proj_name] = int(val)
-                    c += 1 
-                
-                c += 1
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
