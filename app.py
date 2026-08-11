@@ -74,13 +74,11 @@ def process_order_and_get_summary(user_msg):
         if len(parts) >= 1:
             raw_code = parts[0]
             norm_c = normalize_code(raw_code)
-            # หากข้อความส่วนแรกไม่มีตัวอักษรภาษาอังกฤษหรือตัวเลข (เช่น เป็นข้อความภาษาไทยพูดคุย) ให้ข้าม
             if not norm_c:
                 continue
             qty = parts[1] if len(parts) >= 2 else "1"
             input_data.append([raw_code, qty])
 
-    # ถ้าไม่มีรหัสสินค้าเลย ให้แจ้งเตือนกลับ
     if len(input_data) <= 1:
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบให้ถูกต้อง"
 
@@ -129,6 +127,7 @@ def process_order_and_get_summary(user_msg):
                                 global_code_map[norm_c] = (df_raw, r)
                             
         for c in range(num_cols):
+            # ดึงหัวตาราง 3 แถวบนมารวมกันเพื่อวิเคราะห์หาชื่อโปรเจกต์
             txts = [str(df_raw.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 3, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
             h_joined = " ".join(txts)
             combined_headers.append(h_joined)
@@ -141,6 +140,9 @@ def process_order_and_get_summary(user_msg):
                     if pcode not in ["NEW", "OLD", "QTY", "KG", "TOTAL", "SUM", "PO", "BROKEN", "REPAIR"]:
                         if pcode not in project_col_map:
                             project_col_map[pcode] = []
+                        
+                        # [จุดปรับปรุง] เลือกเก็บเฉพาะคอลัมน์ที่ตรงกับช่องจำนวน (เช่น มีคำว่า QTY หรือ อยู่ในคอลัมน์ฝั่งจำนวนหลัก)
+                        # เพื่อป้องกันไม่ให้ดึงคอลัมน์ย่อยอื่นๆ ของโปรเจกต์เดียวกันมาบวกซ้ำซ้อน
                         if c not in project_col_map[pcode]:
                             project_col_map[pcode].append(c)
 
@@ -167,17 +169,19 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            # คำนวณเพดานสูงสุดที่เป็นไปได้ตามหลัก On hand + Balance (ป้องกันตัวเลขบวกทบหลุดสเกล)
             max_limit = max(0, on_hand_val) + abs(balance)
             
             proj_bookings = {}
             for p, cols in project_col_map.items():
-                p_sum = sum(clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1])
-                if p_sum > 0:
-                    # ถ้าค่าที่ดึงมาดูสูงเกินเพดานความเป็นจริง ให้ทำการจำกัดหรือตัดทอนลงมาสมเหตุสมผล
-                    if max_limit > 0 and p_sum > max_limit:
-                        p_sum = max_limit
-                    proj_bookings[p] = int(p_sum)
+                # [จุดปรับปรุง] กรองเอาเฉพาะค่าที่มีตัวเลขมากกว่า 0 และเลือกคอลัมน์ที่เป็นตัวแทนหลักของโปรเจกต์นั้นๆ จริงๆ
+                valid_vals = [clean_num(df_target.iloc[target_row, c]) for c in cols if c < df_target.shape[1]]
+                if valid_vals:
+                    # ใช้ค่าสูงสุดหรือค่าที่ไม่เป็นศูนย์ในกลุ่มคอลัมน์ของโปรเจกต์นั้น เพื่อเลี่ยงการดึงคอลัมน์ย่อยมารวมกันผิดพลาด
+                    p_sum = max(valid_vals) if max(valid_vals) > 0 else 0
+                    if p_sum > 0:
+                        if max_limit > 0 and p_sum > max_limit:
+                            p_sum = max_limit
+                        proj_bookings[p] = int(p_sum)
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
