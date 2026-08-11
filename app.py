@@ -28,7 +28,7 @@ SCOPES = [
 DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_hElAavyPGKkOHY98Vc/edit?gid=0#gid=0"
 
-HEADER_ROW = 4 # แถวหัวตาราง
+HEADER_ROW = 4
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
 DESC_COL_INDEX = 3     
@@ -125,20 +125,21 @@ def process_order_and_get_summary(user_msg):
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             proj_bookings = {}
-            # กวาดเริ่มจากคอลัมน์หลัง Balance
+            # กวาดทุกคอลัมน์ทางขวาตั้งแต่หลัง Balance จนสุดตาราง พร้อมปริ้นท์ Log ออกมาดู
             for c in range(BALANCE_COL_INDEX + 1, df_target.shape[1]):
-                # ดึงหัวตาราง 3 แถวบนมาประกอบชื่อ
-                txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, HEADER_ROW+3) if pd.notna(df_target.iloc[r, c])]
+                txts = [str(df_target.iloc[r, c]).strip() for r in range(0, min(7, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 header_str = " ".join(txts)
-                
-                # ถ้าเจอคอลัมน์ที่เขียนว่า "หักจอง" ให้หยุดกวาด
-                if "หักจอง" in header_str: break
-                
                 val = clean_num(df_target.iloc[target_row, c])
+                
+                # พิมพ์ Log เพื่อตรวจสอบข้อมูลที่อ่านได้ในแต่ละคอลัมน์
+                if val > 0 or "PO" in header_str.upper():
+                    print(f"DEBUG Col {c}: Header='{header_str}', Val={val}")
+
                 if val > 0:
-                    # ใช้ชื่อที่รวมกันจาก header
-                    proj_name = " ".join([t for t in txts if t.lower() not in ["nan", "none", "c", "e", "จอง"]])
-                    if proj_name: proj_bookings[proj_name] = int(val)
+                    valid_names = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "จอง", "เวลา", "ใช้", "ยืม", "วันที่", "พค", "มิย", "กค", "สค"]]
+                    proj_name = " ".join(valid_names)
+                    if proj_name and not any(k in proj_name.lower() for k in ["on hand", "balance", "ขาด", "new", "old"]):
+                        proj_bookings[proj_name] = int(val)
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
@@ -178,4 +179,4 @@ def handle_message(event):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))))
