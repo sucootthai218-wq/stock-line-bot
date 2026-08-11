@@ -155,30 +155,22 @@ def process_order_and_get_summary(user_msg):
             num_cols = df_target.shape[1]
             start_search_col = max(BALANCE_COL_INDEX + 1, 64)
             
-            # กวาดหาคอลัมน์โปรเจกต์ (ทีละคอลัมน์ หรือข้ามช่อง filter ถ้าจำเป็น)
+            # กวาดหาคอลัมน์โปรเจกต์
             c = start_search_col
             while c < num_cols:
-                # ดึงข้อความจากหัวตารางด้านบน (แถว HEADER_ROW ถึง HEADER_ROW + 3)
                 txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 header_block_str = " ".join(txts).lower()
                 
-                # ถ้าเจอคำว่า "หักจอง" หรือยอดสรุป ให้เบรกออกทันที
                 if "หักจอง" in header_block_str or "ยอดรวม" in header_block_str or "total" in header_block_str:
                     break
                 
-                # ตรวจสอบค่าตัวเลขในแถวของสินค้านั้นๆ ตรงคอลัมน์นี้
                 val = clean_num(df_target.iloc[target_row, c])
-                
-                # ประกอบร่างชื่อโครงการจากหัวตาราง
                 proj_name = " ".join([t for t in txts if t and t.lower() not in ["nan", "none", "c", "e"]])
                 proj_lower = proj_name.lower()
                 
-                # หากชื่อโครงการถูกต้องและไม่ติดคำต้องห้าม
                 if proj_name and not any(k in proj_lower for k in excluded_kw):
                     if val > 0:
                         proj_bookings[proj_name] = int(val)
-                    # ขยับข้ามช่อง filter ไป 1 คอลัมน์ตามโครงสร้างจริง (ถ้ามีช่อง filter คั่น)
-                    # หากช่องถัดไปไม่ใช่ข้อมูลซ้ำซ้อน ให้ข้ามไปตรวจต่อ
                     c += 1 
                 
                 c += 1
@@ -200,7 +192,7 @@ def process_order_and_get_summary(user_msg):
                 'shortage': int(qty_needed),
                 'on_hand': "-",
                 'balance': "-",
-                'new": "-",
+                'new': "-",
                 'old': "-",
                 'bookings': {}
             })
