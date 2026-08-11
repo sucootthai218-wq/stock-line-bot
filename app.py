@@ -106,7 +106,6 @@ def process_order_and_get_summary(user_msg):
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
-    # คำค้นหาที่ห้ามนำมานับเป็นชื่อโครงการ (เพื่อตัดคอลัมน์สรุปยอดออก)
     excluded_kw = [
         "no", "code", "รายการ", "order", "category", "weight", "quantity", "qty", 
         "on hand", "balance", "ขาด", "old", "new", "broken", "po", "repair", 
@@ -152,20 +151,23 @@ def process_order_and_get_summary(user_msg):
             old_val = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
-            # ค้นหาข้อมูลการจองเฉพาะคอลัมน์ทางขวาที่เป็นข้อมูลโครงการ (ตั้งแต่คอลัมน์หลัง BALANCE_COL_INDEX เป็นต้นไป)
             proj_bookings = {}
             num_cols = df_target.shape[1]
-            start_search_col = max(BALANCE_COL_INDEX + 1, 64) # เริ่มมองหาจากคอลัมน์หลังสต็อกคงเหลือ
+            start_search_col = max(BALANCE_COL_INDEX + 1, 64)
             
+            # วนลูปกวาดหาเฉพาะคอลัมน์โครงการที่อยู่ทางขวา
             for c in range(start_search_col, num_cols):
+                # ดึงข้อความหัวตารางมาตรวจสอบก่อนว่าเข้าสู่โซน "หักจอง" หรือยัง
+                txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target)))]
+                header_block_str = " ".join(txts).lower()
+                
+                # [จุดปรับปรุง] ถ้าเจอคำว่า "หักจอง" หรือคำที่เกี่ยวข้อง ให้หยุดกวาดทันทีเพื่อไม่ให้ลามไปอ่านโซนอื่น
+                if "หักจอง" in header_block_str or "ยอดรวม" in header_block_str:
+                    break
+                
                 val = clean_num(df_target.iloc[target_row, c])
-                # ถ้าช่องนี้มีจำนวนมากกว่า 0 แสดงว่ามีการจอง/เบิกของจริง
                 if val > 0:
-                    # ดึงข้อความจากหัวตารางในคอลัมน์นี้ (แถว HEADER_ROW ถึง HEADER_ROW + 3) มาประกอบกันเป็นชื่อโครงการ
-                    txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target))) if pd.notna(df_target.iloc[r, c])]
-                    proj_name = " ".join(txts)
-                    
-                    # ตรวจสอบว่าชื่อหัวตารางไม่ใช่คำต้องห้าม (เช่น ไม่ใช่ช่องว่างหรือคำอธิบายทั่วไป)
+                    proj_name = " ".join([t for t in txts if t and t.lower() not in ["nan", "none"]])
                     proj_lower = proj_name.lower()
                     if proj_name and not any(k in proj_lower for k in excluded_kw):
                         proj_bookings[proj_name] = int(val)
