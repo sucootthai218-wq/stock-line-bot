@@ -125,13 +125,11 @@ def process_order_and_get_summary(user_msg):
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             proj_bookings = {}
-            # กวาดทุกคอลัมน์ทางขวาตั้งแต่หลัง Balance จนสุดตาราง พร้อมปริ้นท์ Log ออกมาดู
             for c in range(BALANCE_COL_INDEX + 1, df_target.shape[1]):
                 txts = [str(df_target.iloc[r, c]).strip() for r in range(0, min(7, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 header_str = " ".join(txts)
                 val = clean_num(df_target.iloc[target_row, c])
                 
-                # พิมพ์ Log เพื่อตรวจสอบข้อมูลที่อ่านได้ในแต่ละคอลัมน์
                 if val > 0 or "PO" in header_str.upper():
                     print(f"DEBUG Col {c}: Header='{header_str}', Val={val}")
 
@@ -147,8 +145,8 @@ def process_order_and_get_summary(user_msg):
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
                 'on_hand': int(on_hand),
                 'balance': int(balance),
-                'new': int(new_v) if new_v != 0 else "-",
-                'old': int(old_v) if old_v != 0 else "-",
+                'new': int(new_v) if int(new_v) != 0 else "-",
+                'old': int(old_v) if int(old_v) != 0 else "-",
                 'bookings': proj_bookings
             })
         else:
@@ -179,4 +177,4 @@ def handle_message(event):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
