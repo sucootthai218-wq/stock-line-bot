@@ -130,14 +130,20 @@ def process_order_and_get_summary(user_msg):
                 header_str = " ".join(txts)
                 val = clean_num(df_target.iloc[target_row, c])
                 
-                if val > 0 or "PO" in header_str.upper():
-                    print(f"DEBUG Col {c}: Header='{header_str}', Val={val}")
-
                 if val > 0:
-                    valid_names = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "จอง", "เวลา", "ใช้", "ยืม", "วันที่", "พค", "มิย", "กค", "สค"]]
-                    proj_name = " ".join(valid_names)
-                    if proj_name and not any(k in proj_name.lower() for k in ["on hand", "balance", "ขาด", "new", "old"]):
-                        proj_bookings[proj_name] = int(val)
+                    # คัดกรองเฉพาะหัวข้อที่เป็นรายการจองจริง ๆ (ต้องมีคำว่า "จอง" หรือรูปแบบวันที่จอง)
+                    header_lower = header_str.lower()
+                    is_booking_col = "จอง" in header_lower or "po" in header_lower
+                    
+                    # ตัดหัวข้อสรุปยอดทั้งหมดทิ้ง
+                    exclude_keywords = ["total", "reserve", "maintenance", "pending", "import", "ek17", "น้ำหนัก", "คงเหลือ", "sale", "rent"]
+                    is_excluded = any(kw in header_lower for kw in exclude_keywords)
+
+                    if is_booking_col and not is_excluded:
+                        valid_names = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "จอง", "เวลา", "ใช้", "ยืม", "วันที่", "พค", "มิย", "กค", "สค"]]
+                        proj_name = " ".join(valid_names)
+                        if proj_name:
+                            proj_bookings[proj_name] = int(val)
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
