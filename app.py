@@ -63,7 +63,7 @@ def process_order_and_get_summary(user_msg):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_url(GSHEET_URL)
 
-    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order (กรองเฉพาะบรรทัดที่เป็นรหัสสินค้า)
+    # 1. บันทึกข้อความที่ส่งมาลงใน Input_Order
     ws_input = spreadsheet.worksheet("Input_Order")
     ws_input.clear()
     
@@ -84,14 +84,14 @@ def process_order_and_get_summary(user_msg):
 
     ws_input.update(input_data, 'A1')
 
-    # 2. ล้างไฟล์ Excel เก่าในเซิร์ฟเวอร์ทิ้งก่อนทุกครั้ง
+    # 2. ล้างไฟล์ Excel เก่าในเซิร์ฟเวอร์
     for f in glob.glob("*.xlsx"):
         try:
             os.remove(f)
         except:
             pass
 
-    # 3. ค้นหาและดาวน์โหลดไฟล์ .xlsx ทั้งหมดจาก Google Drive Folder อัตโนมัติ
+    # 3. ดาวน์โหลดไฟล์ .xlsx จาก Google Drive
     drive_service = build('drive', 'v3', credentials=creds)
     query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
@@ -102,7 +102,7 @@ def process_order_and_get_summary(user_msg):
         file_name = file['name']
         gdown.download(id=file_id, output=file_name, quiet=False)
 
-    # 4. ประมวลผลไฟล์ Excel ที่อยู่ในโฟลเดอร์
+    # 4. ประมวลผลข้อมูลจาก Excel
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
@@ -155,22 +155,33 @@ def process_order_and_get_summary(user_msg):
             num_cols = df_target.shape[1]
             start_search_col = max(BALANCE_COL_INDEX + 1, 64)
             
-            # วนลูปกวาดหาเฉพาะคอลัมน์โครงการที่อยู่ทางขวา
-            for c in range(start_search_col, num_cols):
-                # ดึงข้อความหัวตารางมาตรวจสอบก่อนว่าเข้าสู่โซน "หักจอง" หรือยัง
-                txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target)))]
+            # กวาดหาคอลัมน์โปรเจกต์ (ทีละคอลัมน์ หรือข้ามช่อง filter ถ้าจำเป็น)
+            c = start_search_col
+            while c < num_cols:
+                # ดึงข้อความจากหัวตารางด้านบน (แถว HEADER_ROW ถึง HEADER_ROW + 3)
+                txts = [str(df_target.iloc[r, c]).strip() for r in range(HEADER_ROW, min(HEADER_ROW + 4, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 header_block_str = " ".join(txts).lower()
                 
-                # [จุดปรับปรุง] ถ้าเจอคำว่า "หักจอง" หรือคำที่เกี่ยวข้อง ให้หยุดกวาดทันทีเพื่อไม่ให้ลามไปอ่านโซนอื่น
-                if "หักจอง" in header_block_str or "ยอดรวม" in header_block_str:
+                # ถ้าเจอคำว่า "หักจอง" หรือยอดสรุป ให้เบรกออกทันที
+                if "หักจอง" in header_block_str or "ยอดรวม" in header_block_str or "total" in header_block_str:
                     break
                 
+                # ตรวจสอบค่าตัวเลขในแถวของสินค้านั้นๆ ตรงคอลัมน์นี้
                 val = clean_num(df_target.iloc[target_row, c])
-                if val > 0:
-                    proj_name = " ".join([t for t in txts if t and t.lower() not in ["nan", "none"]])
-                    proj_lower = proj_name.lower()
-                    if proj_name and not any(k in proj_lower for k in excluded_kw):
+                
+                # ประกอบร่างชื่อโครงการจากหัวตาราง
+                proj_name = " ".join([t for t in txts if t and t.lower() not in ["nan", "none", "c", "e"]])
+                proj_lower = proj_name.lower()
+                
+                # หากชื่อโครงการถูกต้องและไม่ติดคำต้องห้าม
+                if proj_name and not any(k in proj_lower for k in excluded_kw):
+                    if val > 0:
                         proj_bookings[proj_name] = int(val)
+                    # ขยับข้ามช่อง filter ไป 1 คอลัมน์ตามโครงสร้างจริง (ถ้ามีช่อง filter คั่น)
+                    # หากช่องถัดไปไม่ใช่ข้อมูลซ้ำซ้อน ให้ข้ามไปตรวจต่อ
+                    c += 1 
+                
+                c += 1
 
             report_items.append({
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]) if CODE_B_INDEX < df_target.shape[1] else raw_code, 
@@ -189,12 +200,12 @@ def process_order_and_get_summary(user_msg):
                 'shortage': int(qty_needed),
                 'on_hand': "-",
                 'balance': "-",
-                'new': "-",
+                'new": "-",
                 'old': "-",
                 'bookings': {}
             })
 
-    # 5. สร้างข้อความสรุปผลส่งกลับไปที่ LINE
+    # 5. ส่งสรุปผลกลับทาง LINE
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
@@ -211,7 +222,7 @@ def process_order_and_get_summary(user_msg):
         else:
             summary_text += "- ติดจอง: -\n"
 
-    # อัปเดตลงชีต Summary ใน Google Sheets
+    # อัปเดตลง Google Sheets ชีต Summary
     try:
         active_projects = sorted(list({p for item in report_items for p in item['bookings'].keys()}))
         header = ["รหัสสินค้า", "รายการ", "On hand", "สต็อก Balance", "ขาด", "ของใหม่", "ของเก่า"] + active_projects
