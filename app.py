@@ -50,7 +50,7 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    google_creds_json = os.environ.get('GOOGLE_VISION_CREDENTIALS_JSON') or os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
         creds_dict = json.loads(google_creds_json)
         if "private_key" in creds_dict:
@@ -60,9 +60,8 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def extract_text_from_image(image_content):
-    creds = get_google_credentials()
-    # ส่ง credentials ตรงๆ เข้า ImageAnnotatorClient
-    vision_client = vision.ImageAnnotatorClient(credentials=creds)
+    # ใช้ค่ามาตรฐานจาก Environment Variable บน Render (GOOGLE_APPLICATION_CREDENTIALS)
+    vision_client = vision.ImageAnnotatorClient()
     
     image = vision.Image(content=image_content)
     response = vision_client.text_detection(image=image)
@@ -211,5 +210,5 @@ def handle_image_message(event):
         
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-if __name__ == "__main__":
+If __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
