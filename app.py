@@ -38,6 +38,14 @@ OLD_COL_INDEX = 13
 ON_HAND_COL_INDEX = 62   
 BALANCE_COL_INDEX = 63
 
+# สร้างไฟล์ credentials.json ชั่วคราวจาก Environment Variable อัตโนมัติเมื่อแอปเริ่มทำงาน
+google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+if google_creds_json:
+    with open("credentials.json", "w") as f:
+        f.write(google_creds_json)
+    # กำหนดค่าให้ Google Cloud มองเห็นไฟล์นี้โดยตรง
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "credentials.json"
+
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
     s = str(val).replace(',', '').strip()
@@ -50,14 +58,7 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-    if google_creds_json:
-        creds_dict = json.loads(google_creds_json)
-        if "private_key" in creds_dict:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    else:
-        return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+    return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def extract_text_from_image(image_content):
     vision_client = vision.ImageAnnotatorClient()
