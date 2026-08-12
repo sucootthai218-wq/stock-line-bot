@@ -5,12 +5,13 @@ import json
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 import pandas as pd
 import gdown
+from google.cloud import vision
 
 app = Flask(__name__)
 
@@ -49,7 +50,8 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    # รองรับทั้งตัวแปร GOOGLE_VISION_CREDENTIALS_JSON หรือ GOOGLE_CREDENTIALS_JSON
+    google_creds_json = os.environ.get('GOOGLE_VISION_CREDENTIALS_JSON') or os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
         creds_dict = json.loads(google_creds_json)
         if "private_key" in creds_dict:
@@ -57,6 +59,19 @@ def get_google_credentials():
         return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+
+def extract_text_from_image(image_content):
+    creds = get_google_credentials()
+    client_options = {'credentials': creds}
+    vision_client = vision.ImageAnnotatorClient(client_options=client_options)
+    
+    image = vision.Image(content=image_content)
+    response = vision_client.text_detection(image=image)
+    texts = response.text_annotations
+    
+    if texts:
+        return texts[0].description
+    return ""
 
 def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
@@ -131,11 +146,8 @@ def process_order_and_get_summary(user_msg):
                 val = clean_num(df_target.iloc[target_row, c])
                 
                 if val > 0:
-                    # คัดกรองเฉพาะหัวข้อที่เป็นรายการจองจริง ๆ (ต้องมีคำว่า "จอง" หรือรูปแบบวันที่จอง)
                     header_lower = header_str.lower()
                     is_booking_col = "จอง" in header_lower or "po" in header_lower
-                    
-                    # ตัดหัวข้อสรุปยอดทั้งหมดทิ้ง
                     exclude_keywords = ["total", "reserve", "maintenance", "pending", "import", "ek17", "น้ำหนัก", "คงเหลือ", "sale", "rent"]
                     is_excluded = any(kw in header_lower for kw in exclude_keywords)
 
@@ -180,6 +192,24 @@ def callback():
 def handle_message(event):
     try: reply = process_order_and_get_summary(event.message.text)
     except Exception as e: reply = f"❌ เกิดข้อผิดพลาด: {str(e)}"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    try:
+        message_content = line_bot_api.get_message_content(event.message.id)
+        image_bytes = b"".join(message_content.iter_content())
+        
+        extracted_text = extract_text_from_image(image_bytes)
+        
+        if not extracted_text.strip():
+            reply = "❌ ไม่พบข้อความหรือตัวเลขในรูปภาพ กรุณาลองใหม่อีกครั้ง"
+        else:
+            reply = process_order_and_get_summary(extracted_text)
+            
+    except Exception as e:
+        reply = f"❌ เกิดข้อผิดพลาดในการอ่านรูป: {str(e)}"
+        
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
