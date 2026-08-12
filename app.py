@@ -12,7 +12,6 @@ import gspread
 import pandas as pd
 import gdown
 from google.cloud import vision
-from google.api_core.client_options import ClientOptions
 
 app = Flask(__name__)
 
@@ -62,8 +61,8 @@ def get_google_credentials():
 
 def extract_text_from_image(image_content):
     creds = get_google_credentials()
-    client_options = ClientOptions(credentials=creds)
-    vision_client = vision.ImageAnnotatorClient(client_options=client_options)
+    # ส่ง credentials ตรงๆ เข้า ImageAnnotatorClient
+    vision_client = vision.ImageAnnotatorClient(credentials=creds)
     
     image = vision.Image(content=image_content)
     response = vision_client.text_detection(image=image)
