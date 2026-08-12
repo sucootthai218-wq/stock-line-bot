@@ -12,6 +12,7 @@ import gspread
 import pandas as pd
 import gdown
 from google.cloud import vision
+from google.api_core.client_options import ClientOptions
 
 app = Flask(__name__)
 
@@ -50,7 +51,6 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    # รองรับทั้งตัวแปร GOOGLE_VISION_CREDENTIALS_JSON หรือ GOOGLE_CREDENTIALS_JSON
     google_creds_json = os.environ.get('GOOGLE_VISION_CREDENTIALS_JSON') or os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
         creds_dict = json.loads(google_creds_json)
@@ -62,7 +62,7 @@ def get_google_credentials():
 
 def extract_text_from_image(image_content):
     creds = get_google_credentials()
-    client_options = {'credentials': creds}
+    client_options = ClientOptions(credentials=creds)
     vision_client = vision.ImageAnnotatorClient(client_options=client_options)
     
     image = vision.Image(content=image_content)
