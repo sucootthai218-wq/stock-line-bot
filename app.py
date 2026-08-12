@@ -5,13 +5,12 @@ import json
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 import pandas as pd
 import gdown
-from google.cloud import vision
 
 app = Flask(__name__)
 
@@ -38,14 +37,6 @@ OLD_COL_INDEX = 13
 ON_HAND_COL_INDEX = 62   
 BALANCE_COL_INDEX = 63
 
-# สร้างไฟล์ credentials.json ชั่วคราวจาก Environment Variable อัตโนมัติเมื่อแอปเริ่มทำงาน
-google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-if google_creds_json:
-    with open("credentials.json", "w") as f:
-        f.write(google_creds_json)
-    # กำหนดค่าให้ Google Cloud มองเห็นไฟล์นี้โดยตรง
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "credentials.json"
-
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
     s = str(val).replace(',', '').strip()
@@ -58,18 +49,14 @@ def normalize_code(code_str):
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
 def get_google_credentials():
-    return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-
-def extract_text_from_image(image_content):
-    vision_client = vision.ImageAnnotatorClient()
-    
-    image = vision.Image(content=image_content)
-    response = vision_client.text_detection(image=image)
-    texts = response.text_annotations
-    
-    if texts:
-        return texts[0].description
-    return ""
+    google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    if google_creds_json:
+        creds_dict = json.loads(google_creds_json)
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    else:
+        return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
@@ -190,24 +177,6 @@ def callback():
 def handle_message(event):
     try: reply = process_order_and_get_summary(event.message.text)
     except Exception as e: reply = f"❌ เกิดข้อผิดพลาด: {str(e)}"
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    try:
-        message_content = line_bot_api.get_message_content(event.message.id)
-        image_bytes = b"".join(message_content.iter_content())
-        
-        extracted_text = extract_text_from_image(image_bytes)
-        
-        if not extracted_text.strip():
-            reply = "❌ ไม่พบข้อความหรือตัวเลขในรูปภาพ กรุณาลองใหม่อีกครั้ง"
-        else:
-            reply = process_order_and_get_summary(extracted_text)
-            
-    except Exception as e:
-        reply = f"❌ เกิดข้อผิดพลาดในการอ่านรูป: {str(e)}"
-        
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
