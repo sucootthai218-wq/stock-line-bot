@@ -60,7 +60,6 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def extract_text_from_image(image_content):
-    # ใช้ค่ามาตรฐานจาก Environment Variable บน Render (GOOGLE_APPLICATION_CREDENTIALS)
     vision_client = vision.ImageAnnotatorClient()
     
     image = vision.Image(content=image_content)
@@ -210,5 +209,5 @@ def handle_image_message(event):
         
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-If __name__ == "__main__":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
