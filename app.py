@@ -31,10 +31,12 @@ GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_h
 HEADER_ROW = 4
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
-DESC_COL_INDEX = 3     
+DESC_COL_INDEX = 3      
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
-ON_HAND_COL_INDEX = 62   
+MAINT_COL_INDEX = 14         # คอลัมน์ Maintenance ซ่อมบำรุง/ขุดปูน
+TOTAL_ONHAND_COL_INDEX = 15  # คอลัมน์ Total Onhand (New+Old) + maintenance (นำมาใช้แทน On hand เดิม)
+ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
 def clean_num(val):
@@ -118,10 +120,14 @@ def process_order_and_get_summary(user_msg):
         if match_data:
             df_target, target_row = match_data
             
-            on_hand = clean_num(df_target.iloc[target_row, ON_HAND_COL_INDEX]) if ON_HAND_COL_INDEX < df_target.shape[1] else 0.0
-            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
             new_v = clean_num(df_target.iloc[target_row, NEW_COL_INDEX]) if NEW_COL_INDEX < df_target.shape[1] else 0.0
             old_v = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
+            maint_v = clean_num(df_target.iloc[target_row, MAINT_COL_INDEX]) if MAINT_COL_INDEX < df_target.shape[1] else 0.0
+            
+            # ใช้ค่าจาก Total Onhand (New+Old) + maintenance แทน On hand
+            total_onhand_v = clean_num(df_target.iloc[target_row, TOTAL_ONHAND_COL_INDEX]) if TOTAL_ONHAND_COL_INDEX < df_target.shape[1] else (new_v + old_v + maint_v)
+            
+            balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
             
             proj_bookings = {}
@@ -146,19 +152,20 @@ def process_order_and_get_summary(user_msg):
                 'code': str(df_target.iloc[target_row, CODE_B_INDEX]), 
                 'desc': str(df_target.iloc[target_row, DESC_COL_INDEX]),
                 'shortage': "มีของ" if shortage == 0 else int(shortage),
-                'on_hand': int(on_hand),
+                'on_hand': int(total_onhand_v),
                 'balance': int(balance),
                 'new': int(new_v) if int(new_v) != 0 else "-",
                 'old': int(old_v) if int(old_v) != 0 else "-",
+                'maintenance': int(maint_v) if int(maint_v) != 0 else "-",
                 'bookings': proj_bookings
             })
         else:
-            report_items.append({'code': raw_code, 'desc': "ไม่พบรหัส", 'shortage': int(qty_needed), 'on_hand': "-", 'balance': "-", 'new': "-", 'old': "-", 'bookings': {}})
+            report_items.append({'code': raw_code, 'desc': "ไม่พบรหัส", 'shortage': int(qty_needed), 'on_hand': "-", 'balance': "-", 'new': "-", 'old': "-", 'maintenance': "-", 'bookings': {}})
 
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
-        summary_text += f"- On hand: {item['on_hand']}\n- สต็อก balance: {item['balance']}\n- ขาด: {item['shortage']}\n- ของใหม่: {item['new']}\n- ของเก่า: {item['old']}\n"
+        summary_text += f"- On hand: {item['on_hand']}\n- สต็อก balance: {item['balance']}\n- ขาด: {item['shortage']}\n- ของใหม่: {item['new']}\n- ของเก่า: {item['old']}\n- maintenance: {item['maintenance']}\n"
         if item['bookings']:
             summary_text += "- ติดจอง:\n"
             for p, q in item['bookings'].items(): summary_text += f"  • {p}: {q}\n"
