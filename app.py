@@ -34,8 +34,8 @@ CODE_C_INDEX = 2
 DESC_COL_INDEX = 3      
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
-MAINT_COL_INDEX = 14         # คอลัมน์ Maintenance ซ่อมบำรุง/ขุดปูน
-TOTAL_ONHAND_COL_INDEX = 15  # คอลัมน์ Total Onhand (New+Old) + maintenance (นำมาใช้แทน On hand เดิม)
+MAINT_COL_INDEX = 60         # Maintenance อยู่ช่อง 60
+TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่ช่อง 61 (นำมาใช้แสดงเป็น On hand)
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
@@ -124,7 +124,7 @@ def process_order_and_get_summary(user_msg):
             old_v = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             maint_v = clean_num(df_target.iloc[target_row, MAINT_COL_INDEX]) if MAINT_COL_INDEX < df_target.shape[1] else 0.0
             
-            # ใช้ค่าจาก Total Onhand (New+Old) + maintenance แทน On hand
+            # ดึงค่าจาก Total Onhand (New+Old) + maintenance ช่อง 61 มาแสดงเป็น On hand
             total_onhand_v = clean_num(df_target.iloc[target_row, TOTAL_ONHAND_COL_INDEX]) if TOTAL_ONHAND_COL_INDEX < df_target.shape[1] else (new_v + old_v + maint_v)
             
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
