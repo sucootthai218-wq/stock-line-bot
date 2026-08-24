@@ -2,6 +2,7 @@ import os
 import glob
 import re
 import json
+import time
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -35,9 +36,13 @@ DESC_COL_INDEX = 3
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
 MAINT_COL_INDEX = 60         # Maintenance อยู่ช่อง 60
-TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่ช่อง 61 (นำมาใช้แสดงเป็น On hand)
+TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่ช่อง 61
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
+
+# ตัวแปรสำหรับเก็บ Cache ไฟล์ Excel (กำหนดอายุ 1 ชั่วโมง = 3600 วินาที)
+CACHE_DURATION = 3600
+last_download_time = 0
 
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
@@ -59,6 +64,30 @@ def get_google_credentials():
         return Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+
+def update_excel_cache(creds):
+    global last_download_time
+    current_time = time.time()
+    
+    # เช็คว่ามีไฟล์อยู่ในเครื่องแล้ว และอายุยังไม่เกิน 1 ชั่วโมงหรือไม่
+    existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+    if existing_xlsx and (current_time - last_download_time < CACHE_DURATION):
+        # ใช้ไฟล์เดิมที่มีใน Cache ไม่ต้องดาวน์โหลดใหม่
+        return
+
+    # ถ้ายังไม่มีไฟล์ หรือหมดเวลา 1 ชั่วโมงแล้ว ให้ดาวน์โหลดใหม่
+    for f in existing_xlsx:
+        try: os.remove(f)
+        except: pass
+
+    drive_service = build('drive', 'v3', credentials=creds)
+    query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
+    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    files = results.get('files', [])
+    for file in files:
+        gdown.download(id=file['id'], output=file['name'], quiet=True)
+        
+    last_download_time = time.time()
 
 def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
@@ -83,16 +112,8 @@ def process_order_and_get_summary(user_msg):
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบให้ถูกต้อง"
     ws_input.update(input_data, 'A1')
 
-    for f in glob.glob("*.xlsx"):
-        try: os.remove(f)
-        except: pass
-
-    drive_service = build('drive', 'v3', credentials=creds)
-    query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get('files', [])
-    for file in files:
-        gdown.download(id=file['id'], output=file['name'], quiet=True)
+    # เรียกใช้ฟังก์ชันตรวจสอบ Cache ก่อนโหลดไฟล์จาก Google Drive
+    update_excel_cache(creds)
 
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
@@ -123,8 +144,6 @@ def process_order_and_get_summary(user_msg):
             new_v = clean_num(df_target.iloc[target_row, NEW_COL_INDEX]) if NEW_COL_INDEX < df_target.shape[1] else 0.0
             old_v = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             maint_v = clean_num(df_target.iloc[target_row, MAINT_COL_INDEX]) if MAINT_COL_INDEX < df_target.shape[1] else 0.0
-            
-            # ดึงค่าจาก Total Onhand (New+Old) + maintenance ช่อง 61 มาแสดงเป็น On hand
             total_onhand_v = clean_num(df_target.iloc[target_row, TOTAL_ONHAND_COL_INDEX]) if TOTAL_ONHAND_COL_INDEX < df_target.shape[1] else (new_v + old_v + maint_v)
             
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
