@@ -68,15 +68,10 @@ def get_google_credentials():
 
 def update_excel_cache(creds):
     global last_download_time
-    current_time = time.time()
     
-    # เช็คว่ามีไฟล์อยู่ในเครื่องแล้ว และอายุยังไม่เกิน 4 ชั่วโมงหรือไม่
     existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
-    if existing_xlsx and (current_time - last_download_time < CACHE_DURATION):
-        # ใช้ไฟล์เดิมที่มีใน Cache ไม่ต้องดาวน์โหลดใหม่
-        return
 
-    # ถ้ายังไม่มีไฟล์ หรือหมดเวลา 4 ชั่วโมงแล้ว ให้ดาวน์โหลดใหม่
+    # ลบไฟล์เก่าทิ้งก่อนดาวน์โหลดใหม่เสมอ
     for f in existing_xlsx:
         try: os.remove(f)
         except: pass
@@ -89,18 +84,23 @@ def update_excel_cache(creds):
         gdown.download(id=file['id'], output=file['name'], quiet=True)
         
     last_download_time = time.time()
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว")
 
-def background_preload():
-    try:
-        print("กำลังโหลดข้อมูลเข้า Cache ในเบื้องหลัง...")
-        creds = get_google_credentials()
-        update_excel_cache(creds)
-        print("โหลด Cache สำเร็จ พร้อมใช้งาน!")
-    except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการโหลด Cache: {e}")
+def background_sync_loop():
+    """ วนลูปทำงานเบื้องหลังเพื่อดาวน์โหลดไฟล์ใหม่ทุกๆ 4 ชั่วโมง """
+    while True:
+        try:
+            print("กำลังตรวจสอบและอัปเดตข้อมูล Excel ในเบื้องหลัง...")
+            creds = get_google_credentials()
+            update_excel_cache(creds)
+        except Exception as e:
+            print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
+        
+        # รอเวลา 4 ชั่วโมง (14400วินาที) ค่อยวนกลับมาโหลดใหม่
+        time.sleep(CACHE_DURATION)
 
-# สั่งรันแยก Thread เพื่อไม่ให้บล็อกการทำงานหลักของเซิร์ฟเวอร์ตอนเริ่มระบบ
-threading.Thread(target=background_preload, daemon=True).start()
+# เริ่มต้น Thread ทำงานเบื้องหลังทันทีที่แอปเปิดขึ้น
+threading.Thread(target=background_sync_loop, daemon=True).start()
 
 def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
@@ -125,8 +125,7 @@ def process_order_and_get_summary(user_msg):
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบให้ถูกต้อง"
     ws_input.update(input_data, 'A1')
 
-    # (นำคำสั่ง update_excel_cache ออกจากฟังก์ชันนี้แล้ว เพื่อป้องกัน Worker Timeout เวลาลูกค้าส่งข้อความเข้ามา)
-
+    # อ่านไฟล์ Excel ที่ถูก Cache ไว้ในเครื่องมาประมวลผลทันทีโดยไม่ต้องโหลดใหม่ตอนลูกคบทักมา
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
