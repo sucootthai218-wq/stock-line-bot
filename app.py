@@ -3,6 +3,7 @@ import glob
 import re
 import json
 import time
+import threading
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -69,13 +70,13 @@ def update_excel_cache(creds):
     global last_download_time
     current_time = time.time()
     
-    # เช็คว่ามีไฟล์อยู่ในเครื่องแล้ว และอายุยังไม่เกิน 1 ชั่วโมงหรือไม่
+    # เช็คว่ามีไฟล์อยู่ในเครื่องแล้ว และอายุยังไม่เกิน 4 ชั่วโมงหรือไม่
     existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     if existing_xlsx and (current_time - last_download_time < CACHE_DURATION):
         # ใช้ไฟล์เดิมที่มีใน Cache ไม่ต้องดาวน์โหลดใหม่
         return
 
-    # ถ้ายังไม่มีไฟล์ หรือหมดเวลา 1 ชั่วโมงแล้ว ให้ดาวน์โหลดใหม่
+    # ถ้ายังไม่มีไฟล์ หรือหมดเวลา 4 ชั่วโมงแล้ว ให้ดาวน์โหลดใหม่
     for f in existing_xlsx:
         try: os.remove(f)
         except: pass
@@ -88,6 +89,18 @@ def update_excel_cache(creds):
         gdown.download(id=file['id'], output=file['name'], quiet=True)
         
     last_download_time = time.time()
+
+def background_preload():
+    try:
+        print("กำลังโหลดข้อมูลเข้า Cache ในเบื้องหลัง...")
+        creds = get_google_credentials()
+        update_excel_cache(creds)
+        print("โหลด Cache สำเร็จ พร้อมใช้งาน!")
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาดในการโหลด Cache: {e}")
+
+# สั่งรันแยก Thread เพื่อไม่ให้บล็อกการทำงานหลักของเซิร์ฟเวอร์ตอนเริ่มระบบ
+threading.Thread(target=background_preload, daemon=True).start()
 
 def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
