@@ -41,9 +41,10 @@ TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-# ตัวแปรสำหรับเก็บ Cache ไฟล์ Excel (กำหนดอายุ 4 ชั่วโมง = 14400 วินาที)
+# ตัวแปรสำหรับเก็บ Cache ไฟล์ Excel และเวลาที่อัปเดต (กำหนดอายุ 4 ชั่วโมง = 14400 วินาที)
 CACHE_DURATION = 4 * 3600
 last_download_time = 0
+last_download_str = "-"
 
 def clean_num(val):
     if pd.isna(val) or val is None: return 0.0
@@ -67,7 +68,7 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 def update_excel_cache(creds):
-    global last_download_time
+    global last_download_time, last_download_str
     
     existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 
@@ -84,6 +85,7 @@ def update_excel_cache(creds):
         gdown.download(id=file['id'], output=file['name'], quiet=True)
         
     last_download_time = time.time()
+    last_download_str = time.strftime('%d/%m/%Y เวลา %H:%M น.')
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว")
 
 def background_sync_loop():
@@ -96,7 +98,7 @@ def background_sync_loop():
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
         
-        # รอเวลา 4 ชั่วโมง (14400วินาที) ค่อยวนกลับมาโหลดใหม่
+        # รอเวลา 4 ชั่วโมง (14400 วินาที) ค่อยวนกลับมาโหลดใหม่
         time.sleep(CACHE_DURATION)
 
 # เริ่มต้น Thread ทำงานเบื้องหลังทันทีที่แอปเปิดขึ้น
@@ -200,6 +202,9 @@ def process_order_and_get_summary(user_msg):
             summary_text += "- ติดจอง:\n"
             for p, q in item['bookings'].items(): summary_text += f"  • {p}: {q}\n"
         else: summary_text += "- ติดจอง: -\n"
+
+    # เพิ่มบรรทัดแสดงเวลาอัปเดตไฟล์ล่าสุดต่อท้ายรายงาน
+    summary_text += f"\n🕒 (ข้อมูลจากไฟล์อัปเดตล่าสุดเมื่อ: {last_download_str})"
 
     return summary_text
 
