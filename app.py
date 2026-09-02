@@ -41,8 +41,8 @@ TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-# ตัวแปรสำหรับเก็บ Cache ไฟล์ Excel และเวลาที่อัปเดต (กำหนดอายุ 4 ชั่วโมง = 14400 วินาที)
-CACHE_DURATION = 4 * 3600
+# กำหนดเวลาอัปเดตทุก 2 ชั่วโมง = 7200 วินาที
+CACHE_DURATION = 2 * 3600
 last_download_time = 0
 last_download_str = "-"
 
