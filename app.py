@@ -125,8 +125,7 @@ def process_order_and_get_summary(user_msg):
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบให้ถูกต้อง"
     ws_input.update(input_data, 'A1')
 
-    # เรียกใช้ฟังก์ชันตรวจสอบ Cache ก่อนโหลดไฟล์จาก Google Drive
-    update_excel_cache(creds)
+    # (นำคำสั่ง update_excel_cache ออกจากฟังก์ชันนี้แล้ว เพื่อป้องกัน Worker Timeout เวลาลูกค้าส่งข้อความเข้ามา)
 
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
