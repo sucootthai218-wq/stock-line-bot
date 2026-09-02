@@ -40,8 +40,8 @@ TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-# ตัวแปรสำหรับเก็บ Cache ไฟล์ Excel (กำหนดอายุ 1 ชั่วโมง = 3600 วินาที)
-CACHE_DURATION = 3600
+# ตัวแปรสำหรับเก็บ Cache ไฟล์ Excel (กำหนดอายุ 4 ชั่วโมง = 14400 วินาที)
+CACHE_DURATION = 4 * 3600
 last_download_time = 0
 
 def clean_num(val):
