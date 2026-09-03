@@ -5,6 +5,7 @@ import json
 import time
 import threading
 import datetime
+import pytz
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -37,7 +38,7 @@ CODE_C_INDEX = 2
 DESC_COL_INDEX = 3        
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
-MAINT_COL_INDEX = 60         # Maintenance อยู่ช่อง 60
+MAINT_COL_INDEX = 60           # Maintenance อยู่ช่อง 60
 TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่ช่อง 61
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
@@ -86,11 +87,14 @@ def update_excel_cache(creds):
         gdown.download(id=file['id'], output=file['name'], quiet=True)
         
     last_download_time = time.time()
-    last_download_str = datetime.datetime.now().strftime('%d/%m/%Y เวลา %H:%M น.')
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว")
+    
+    # บันทึกเวลาปัจจุบันตามโซนเวลาประเทศไทย
+    tz = pytz.timezone('Asia/Bangkok')
+    last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว (เวลาแสดงผล: {last_download_str})")
 
 def background_sync_loop():
-    """ วนลูปทำงานเบื้องหลังเพื่อดาวน์โหลดไฟล์ใหม่ทุกๆ 2 ชั่วโมง """
+    """ วนลูปทำงานเบื้องหลังเพื่อดาวน์โหลดไฟล์ใหม่ทุกๆ 1 ชั่วโมง (3600 วินาที) """
     while True:
         try:
             print("กำลังตรวจสอบและอัปเดตข้อมูล Excel ในเบื้องหลัง...")
@@ -99,7 +103,7 @@ def background_sync_loop():
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
         
-        # รอเวลาตาม CACHE_DURATION (7200 วินาที / 2 ชั่วโมง) ค่อยวนกลับมาโหลดใหม่
+        # รอเวลาตาม CACHE_DURATION (3600 วินาที / 1 ชั่วโมง) ค่อยวนกลับมาโหลดใหม่
         time.sleep(CACHE_DURATION)
 
 # เริ่มต้น Thread ทำงานเบื้องหลังทันทีที่แอปเปิดขึ้น (พร้อมดาวน์โหลดและบันทึกเวลาเริ่มต้นทันที)
