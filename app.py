@@ -4,6 +4,7 @@ import re
 import json
 import time
 import threading
+import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -33,7 +34,7 @@ GSHEET_URL = "https://docs.google.com/spreadsheets/d/1ngb3u6xzE6m0QSre1gTwFxm0_h
 HEADER_ROW = 4
 CODE_B_INDEX = 1
 CODE_C_INDEX = 2
-DESC_COL_INDEX = 3      
+DESC_COL_INDEX = 3        
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
 MAINT_COL_INDEX = 60         # Maintenance อยู่ช่อง 60
@@ -85,11 +86,11 @@ def update_excel_cache(creds):
         gdown.download(id=file['id'], output=file['name'], quiet=True)
         
     last_download_time = time.time()
-    last_download_str = time.strftime('%d/%m/%Y เวลา %H:%M น.')
+    last_download_str = datetime.datetime.now().strftime('%d/%m/%Y เวลา %H:%M น.')
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว")
 
 def background_sync_loop():
-    """ วนลูปทำงานเบื้องหลังเพื่อดาวน์โหลดไฟล์ใหม่ทุกๆ 4 ชั่วโมง """
+    """ วนลูปทำงานเบื้องหลังเพื่อดาวน์โหลดไฟล์ใหม่ทุกๆ 2 ชั่วโมง """
     while True:
         try:
             print("กำลังตรวจสอบและอัปเดตข้อมูล Excel ในเบื้องหลัง...")
@@ -98,10 +99,17 @@ def background_sync_loop():
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
         
-        # รอเวลา 4 ชั่วโมง (14400 วินาที) ค่อยวนกลับมาโหลดใหม่
+        # รอเวลาตาม CACHE_DURATION (7200 วินาที / 2 ชั่วโมง) ค่อยวนกลับมาโหลดใหม่
         time.sleep(CACHE_DURATION)
 
-# เริ่มต้น Thread ทำงานเบื้องหลังทันทีที่แอปเปิดขึ้น
+# เริ่มต้น Thread ทำงานเบื้องหลังทันทีที่แอปเปิดขึ้น (พร้อมดาวน์โหลดและบันทึกเวลาเริ่มต้นทันที)
+try:
+    print("กำลังดาวน์โหลดไฟล์ Excel เริ่มต้นครั้งแรก...")
+    initial_creds = get_google_credentials()
+    update_excel_cache(initial_creds)
+except Exception as e:
+    print(f"เกิดข้อผิดพลาดในการดาวน์โหลดเริ่มต้น: {e}")
+
 threading.Thread(target=background_sync_loop, daemon=True).start()
 
 def process_order_and_get_summary(user_msg):
