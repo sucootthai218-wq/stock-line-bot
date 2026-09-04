@@ -38,12 +38,11 @@ CODE_C_INDEX = 2
 DESC_COL_INDEX = 3        
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
-MAINT_COL_INDEX = 60           # Maintenance อยู่ช่อง 60
+MAINT_COL_INDEX = 60            # Maintenance อยู่ช่อง 60
 TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่ช่อง 61
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-# กำหนดเวลาอัปเดตทุก 1 ชั่วโมง = 3600 วินาที
 CACHE_DURATION = 3600
 last_download_time = 0
 last_download_str = "-"
@@ -94,7 +93,7 @@ def update_excel_cache(creds):
     print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว (เวลาแสดงผล: {last_download_str})")
 
 def background_sync_loop():
-    """ วนลูปทำงานเบื้องหลังเพื่อดาวน์โหลดไฟล์ใหม่ทุกๆ 1 ชั่วโมง (3600 วินาที) """
+    """ วนลูปทำงานเบื้องหลังสำรอง """
     while True:
         try:
             print("กำลังตรวจสอบและอัปเดตข้อมูล Excel ในเบื้องหลัง...")
@@ -103,10 +102,9 @@ def background_sync_loop():
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
         
-        # รอเวลาตาม CACHE_DURATION (3600 วินาที / 1 ชั่วโมง) ค่อยวนกลับมาโหลดใหม่
         time.sleep(CACHE_DURATION)
 
-# เริ่มต้น Thread ทำงานเบื้องหลังทันทีที่แอปเปิดขึ้น (พร้อมดาวน์โหลดและบันทึกเวลาเริ่มต้นทันที)
+# เริ่มต้น Thread ทำงานเบื้องหลังตอนแอปเปิด
 try:
     print("กำลังดาวน์โหลดไฟล์ Excel เริ่มต้นครั้งแรก...")
     initial_creds = get_google_credentials()
@@ -115,6 +113,17 @@ except Exception as e:
     print(f"เกิดข้อผิดพลาดในการดาวน์โหลดเริ่มต้น: {e}")
 
 threading.Thread(target=background_sync_loop, daemon=True).start()
+
+# เพิ่ม Endpoint สำหรับให้ Cron-Job ภายนอกเรียกสั่งอัปเดตโดยตรง
+@app.route("/cron-sync", methods=['GET'])
+def cron_sync():
+    try:
+        print("ได้รับสัญญาณ Cron-Job ภายนอก กำลังอัปเดตไฟล์ Excel...")
+        creds = get_google_credentials()
+        update_excel_cache(creds)
+        return f"Sync Success at {last_download_str}", 200
+    except Exception as e:
+        return f"Sync Error: {str(e)}", 500
 
 def process_order_and_get_summary(user_msg):
     creds = get_google_credentials()
@@ -139,7 +148,6 @@ def process_order_and_get_summary(user_msg):
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบให้ถูกต้อง"
     ws_input.update(input_data, 'A1')
 
-    # อ่านไฟล์ Excel ที่ถูก Cache ไว้ในเครื่องมาประมวลผลทันทีโดยไม่ต้องโหลดใหม่ตอนลูกคบทักมา
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     global_code_map = {}
 
@@ -215,7 +223,6 @@ def process_order_and_get_summary(user_msg):
             for p, q in item['bookings'].items(): summary_text += f"  • {p}: {q}\n"
         else: summary_text += "- ติดจอง: -\n"
 
-    # เพิ่มบรรทัดแสดงเวลาอัปเดตไฟล์ล่าสุดต่อท้ายรายงาน
     summary_text += f"\n🕒 (ข้อมูลจากไฟล์อัปเดตล่าสุดเมื่อ: {last_download_str})"
 
     return summary_text
