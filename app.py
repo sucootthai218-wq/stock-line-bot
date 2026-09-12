@@ -5,6 +5,7 @@ import json
 import time
 import threading
 import datetime
+import gc  # <--- [เพิ่มเข้ามา] ไลบรารีสำหรับเคลียร์ RAM ป้องกัน Memory Limit เต็ม
 import pytz
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -70,7 +71,7 @@ def get_google_credentials():
 
 def update_excel_cache(creds):
     global last_download_time, last_download_str
-    
+
     existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 
     # ลบไฟล์เก่าทิ้งก่อนดาวน์โหลดใหม่เสมอ
@@ -84,13 +85,16 @@ def update_excel_cache(creds):
     files = results.get('files', [])
     for file in files:
         gdown.download(id=file['id'], output=file['name'], quiet=True)
-        
+
     last_download_time = time.time()
-    
+
     # บันทึกเวลาปัจจุบันตามโซนเวลาประเทศไทย
     tz = pytz.timezone('Asia/Bangkok')
     last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
-    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache เรียบร้อยแล้ว (เวลาแสดงผล: {last_download_str})")
+    
+    # [เพิ่มเข้ามา] สั่งเคลียร์ RAM ทันทีหลังดาวน์โหลดเสร็จ
+    gc.collect()
+    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache และเคลียร์ RAM เรียบร้อยแล้ว (เวลาแสดงผล: {last_download_str})")
 
 def background_sync_loop():
     """ วนลูปทำงานเบื้องหลังสำรอง """
@@ -101,7 +105,7 @@ def background_sync_loop():
             update_excel_cache(creds)
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
-        
+
         time.sleep(CACHE_DURATION)
 
 # เริ่มต้น Thread ทำงานเบื้องหลังตอนแอปเปิด
@@ -132,7 +136,7 @@ def process_order_and_get_summary(user_msg):
 
     ws_input = spreadsheet.worksheet("Input_Order")
     ws_input.clear()
-    
+
     lines = user_msg.strip().split('\n')
     input_data = [["Code", "Qty"]]
     for line in lines:
@@ -164,30 +168,30 @@ def process_order_and_get_summary(user_msg):
 
     df_input = pd.DataFrame(ws_input.get_all_records())
     report_items = []
-    
+
     for _, row in df_input.iterrows():
         raw_code = str(row[df_input.columns[0]]).strip()
         norm_input = normalize_code(raw_code)
         qty_needed = clean_num(row[df_input.columns[1]])
-        
+
         match_data = global_code_map.get(norm_input)
         if match_data:
             df_target, target_row = match_data
-            
+
             new_v = clean_num(df_target.iloc[target_row, NEW_COL_INDEX]) if NEW_COL_INDEX < df_target.shape[1] else 0.0
             old_v = clean_num(df_target.iloc[target_row, OLD_COL_INDEX]) if OLD_COL_INDEX < df_target.shape[1] else 0.0
             maint_v = clean_num(df_target.iloc[target_row, MAINT_COL_INDEX]) if MAINT_COL_INDEX < df_target.shape[1] else 0.0
             total_onhand_v = clean_num(df_target.iloc[target_row, TOTAL_ONHAND_COL_INDEX]) if TOTAL_ONHAND_COL_INDEX < df_target.shape[1] else (new_v + old_v + maint_v)
-            
+
             balance = clean_num(df_target.iloc[target_row, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < df_target.shape[1] else 0.0
             shortage = qty_needed if balance < 0 else max(0, qty_needed - balance)
-            
+
             proj_bookings = {}
             for c in range(BALANCE_COL_INDEX + 1, df_target.shape[1]):
                 txts = [str(df_target.iloc[r, c]).strip() for r in range(0, min(7, len(df_target))) if pd.notna(df_target.iloc[r, c])]
                 header_str = " ".join(txts)
                 val = clean_num(df_target.iloc[target_row, c])
-                
+
                 if val > 0:
                     header_lower = header_str.lower()
                     is_booking_col = "จอง" in header_lower or "po" in header_lower
@@ -224,6 +228,11 @@ def process_order_and_get_summary(user_msg):
         else: summary_text += "- ติดจอง: -\n"
 
     summary_text += f"\n🕒 (ข้อมูลจากไฟล์อัปเดตล่าสุดเมื่อ: {last_download_str})"
+
+    # [เพิ่มเข้ามา] เคลียร์ตัวแปรข้อมูล DataFrame ทิ้งทันทีหลังประมวลผลเสร็จ เพื่อคืน RAM ให้เซิร์ฟเวอร์
+    del global_code_map
+    del df_input
+    gc.collect()
 
     return summary_text
 
