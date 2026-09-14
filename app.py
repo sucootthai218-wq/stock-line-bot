@@ -5,7 +5,7 @@ import json
 import time
 import threading
 import datetime
-import gc  # <--- [เพิ่มเข้ามา] ไลบรารีสำหรับเคลียร์ RAM ป้องกัน Memory Limit เต็ม
+import gc
 import pytz
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -13,9 +13,10 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import io
 import gspread
 import pandas as pd
-import gdown
 
 app = Flask(__name__)
 
@@ -39,8 +40,8 @@ CODE_C_INDEX = 2
 DESC_COL_INDEX = 3        
 NEW_COL_INDEX = 12
 OLD_COL_INDEX = 13
-MAINT_COL_INDEX = 60            # Maintenance อยู่ช่อง 60
-TOTAL_ONHAND_COL_INDEX = 61  # Total Onhand (New+Old) + maintenance อยู่ช่อง 61
+MAINT_COL_INDEX = 60            
+TOTAL_ONHAND_COL_INDEX = 61  
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
@@ -74,7 +75,7 @@ def update_excel_cache(creds):
 
     existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 
-    # ลบไฟล์เก่าทิ้งก่อนดาวน์โหลดใหม่เสมอ
+    # ลบไฟล์เก่าทิ้งก่อนดาวน์โหลดใหม่
     for f in existing_xlsx:
         try: os.remove(f)
         except: pass
@@ -83,21 +84,38 @@ def update_excel_cache(creds):
     query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get('files', [])
+
+    if not files:
+        print("⚠️ ไม่พบไฟล์ Excel ในโฟลเดอร์ Google Drive ที่กำหนด")
+        return
+
     for file in files:
-        gdown.download(id=file['id'], output=file['name'], quiet=True)
+        file_id = file['id']
+        file_name = file['name']
+        try:
+            request_file = drive_service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request_file)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            
+            fh.seek(0)
+            with open(file_name, 'wb') as f:
+                f.write(fh.read())
+            print(f"✅ ดาวน์โหลดไฟล์ {file_name} สำเร็จผ่าน Drive API")
+        except Exception as e:
+            print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
     last_download_time = time.time()
 
-    # บันทึกเวลาปัจจุบันตามโซนเวลาประเทศไทย
     tz = pytz.timezone('Asia/Bangkok')
     last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
     
-    # [เพิ่มเข้ามา] สั่งเคลียร์ RAM ทันทีหลังดาวน์โหลดเสร็จ
     gc.collect()
-    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache และเคลียร์ RAM เรียบร้อยแล้ว (เวลาแสดงผล: {last_download_str})")
+    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] อัปเดตไฟล์ Excel เข้า Cache สำเร็จ (เวลาแสดงผล: {last_download_str})")
 
 def background_sync_loop():
-    """ วนลูปทำงานเบื้องหลังสำรอง """
     while True:
         try:
             print("กำลังตรวจสอบและอัปเดตข้อมูล Excel ในเบื้องหลัง...")
@@ -108,7 +126,6 @@ def background_sync_loop():
 
         time.sleep(CACHE_DURATION)
 
-# เริ่มต้น Thread ทำงานเบื้องหลังตอนแอปเปิด
 try:
     print("กำลังดาวน์โหลดไฟล์ Excel เริ่มต้นครั้งแรก...")
     initial_creds = get_google_credentials()
@@ -118,7 +135,6 @@ except Exception as e:
 
 threading.Thread(target=background_sync_loop, daemon=True).start()
 
-# เพิ่ม Endpoint สำหรับให้ Cron-Job ภายนอกเรียกสั่งอัปเดตโดยตรง
 @app.route("/cron-sync", methods=['GET'])
 def cron_sync():
     try:
@@ -229,7 +245,6 @@ def process_order_and_get_summary(user_msg):
 
     summary_text += f"\n🕒 (ข้อมูลจากไฟล์อัปเดตล่าสุดเมื่อ: {last_download_str})"
 
-    # [เพิ่มเข้ามา] เคลียร์ตัวแปรข้อมูล DataFrame ทิ้งทันทีหลังประมวลผลเสร็จ เพื่อคืน RAM ให้เซิร์ฟเวอร์
     del global_code_map
     del df_input
     gc.collect()
