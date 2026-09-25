@@ -45,7 +45,7 @@ TOTAL_ONHAND_COL_INDEX = 61
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-CACHE_DURATION = 3600
+CACHE_DURATION = 10800
 last_download_time = 0
 last_download_str = "-"
 
