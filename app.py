@@ -50,7 +50,7 @@ CACHE_DURATION = 28800  # 8 ชั่วโมง
 last_download_time = 0
 last_download_str = "-"
 
-# Global In-Memory Cache เพื่อหลีกเลี่ยงการเปิดไฟล์ Excel ซ้ำๆ ใน Webhook
+# Global Cache สำหรับเก็บข้อมูลในหน่วยความจำ
 STOCK_CACHE = {}
 cache_lock = threading.Lock()
 
@@ -105,7 +105,6 @@ def update_excel_cache(creds):
         print("⚠️ ไม่พบไฟล์ Excel ในโฟลเดอร์ Google Drive ที่กำหนด")
         return
 
-    # ดาวน์โหลดไฟล์ทั้งหมดลงดิสก์ชั่วคราว
     for file in files:
         file_id = file['id']
         file_name = file['name']
@@ -124,7 +123,6 @@ def update_excel_cache(creds):
         except Exception as e:
             print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
-    # ประมวลผลและสร้าง In-Memory Stock Lookup Map
     new_stock_map = {}
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 
@@ -133,25 +131,34 @@ def update_excel_cache(creds):
             df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
             num_cols = df_raw.shape[1]
 
-            # สกัดชื่อหัวคอลัมน์สำหรับการจองล่วงหน้า (Row 0 ถึง 6)
+            # กรองและสกัดหัวคอลัมน์การจอง โดยตัดคอลัมน์คำนวณภายใน/หักจองออก
             col_booking_meta = {}
             for c in range(BALANCE_COL_INDEX + 1, num_cols):
                 txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
                 header_str = " ".join(txts)
                 header_lower = header_str.lower()
-                is_booking_col = "จอง" in header_lower or "po" in header_lower
-                exclude_keywords = ["total", "reserve", "maintenance", "pending", "import", "ek17", "น้ำหนัก", "คงเหลือ", "sale", "rent"]
+
+                # คำที่บ่งบอกว่าเป็นคอลัมน์คำนวณภายใน/คอลัมน์ตัดยอด ไม่ใช่รายการจองงานจริง
+                exclude_keywords = [
+                    "total", "reserve", "maintenance", "pending", "import", 
+                    "ek17", "น้ำหนัก", "คงเหลือ", "sale", "rent", 
+                    "หักจอง", "หัก จอง", "balance"
+                ]
                 is_excluded = any(kw in header_lower for kw in exclude_keywords)
 
+                is_booking_col = ("จอง" in header_lower or "po" in header_lower or "ใช้" in header_lower)
+
                 if is_booking_col and not is_excluded:
-                    valid_names = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "จอง", "เวลา", "ใช้", "ยืม", "วันที่", "พค", "มิย", "กค", "สค"]]
-                    proj_name = " ".join(valid_names).strip()
-                    if proj_name:
+                    # เก็บข้อความ วันที่จอง เวลา วันที่ใช้ และชื่อโครงการไว้ครบถ้วน
+                    clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
+                    proj_name = " ".join(clean_tokens).strip()
+
+                    # ต้องมีข้อความระบุรายละเอียดและไม่ใช่แค่ตัวเลขหรือคำสั้นๆ
+                    if proj_name and len(proj_name) > 3:
                         col_booking_meta[c] = proj_name
 
             # อ่านข้อมูลแถวสินค้า
             for r in range(HEADER_ROW + 1, len(df_raw)):
-                # ค้นหารหัสใน Col B และ C
                 extracted_codes = []
                 for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
                     if col_idx < num_cols:
@@ -163,7 +170,6 @@ def update_excel_cache(creds):
                 if not extracted_codes:
                     continue
 
-                # ดึงตัวเลขและข้อมูลสต็อก
                 new_v = clean_num(df_raw.iloc[r, NEW_COL_INDEX]) if NEW_COL_INDEX < num_cols else 0.0
                 old_v = clean_num(df_raw.iloc[r, OLD_COL_INDEX]) if OLD_COL_INDEX < num_cols else 0.0
                 maint_v = clean_num(df_raw.iloc[r, MAINT_COL_INDEX]) if MAINT_COL_INDEX < num_cols else 0.0
@@ -175,7 +181,7 @@ def update_excel_cache(creds):
 
                 balance_v = clean_num(df_raw.iloc[r, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < num_cols else 0.0
 
-                # ดึงข้อมูลการจองรายโครงการ
+                # ดึงเฉพาะยอดการจองที่มีค่ามากกว่า 0
                 proj_bookings = {}
                 for col_idx, proj_name in col_booking_meta.items():
                     val = clean_num(df_raw.iloc[r, col_idx])
@@ -193,7 +199,6 @@ def update_excel_cache(creds):
                     'bookings': proj_bookings
                 }
 
-                # แมปรหัสสินค้าทุกลักษณะเข้าสู่ Dictionary
                 for norm_c in extracted_codes:
                     if norm_c not in new_stock_map:
                         new_stock_map[norm_c] = item_info
@@ -202,7 +207,6 @@ def update_excel_cache(creds):
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ {file_path}: {e}")
 
-    # อัปเดต Cache ใน Memory
     with cache_lock:
         STOCK_CACHE = new_stock_map
 
@@ -246,7 +250,7 @@ def cron_sync():
         return f"Sync Error: {str(e)}", 500
 
 # ==========================================
-# 🔍 การประมวลผลคำสั่งเช็คสต็อก (เร็วระดับ Instant)
+# 🔍 การประมวลผลคำสั่งเช็คสต็อก
 # ==========================================
 def process_order_and_get_summary(user_msg):
     lines = user_msg.strip().split('\n')
@@ -300,7 +304,7 @@ def process_order_and_get_summary(user_msg):
                 'bookings': {}
             })
 
-    # ประกอบข้อความตอบกลับ
+    # ประกอบข้อความสรุปรายงาน
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
@@ -310,8 +314,10 @@ def process_order_and_get_summary(user_msg):
         summary_text += f"- ของใหม่: {item['new']}\n"
         summary_text += f"- ของเก่า: {item['old']}\n"
         summary_text += f"- maintenance: {item['maintenance']}\n"
+
         if item['bookings']:
-            summary_text += "- ติดจอง:\n"
+            total_booked = sum(item['bookings'].values())
+            summary_text += f"- ติดจอง (รวม {total_booked}):\n"
             for p, q in item['bookings'].items():
                 summary_text += f"   • {p}: {q}\n"
         else:
