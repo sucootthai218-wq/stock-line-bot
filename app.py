@@ -39,12 +39,13 @@ NEW_COL = 13    # Col M
 OLD_COL = 14    # Col N
 MAINT_COL = 61  # Col BI
 TOTAL_ONHAND_COL = 62  # Col BJ
-BALANCE_COL = 64       # Col BL (Index 63)
+BALANCE_COL = 64       # Col BL
 
 CACHE_DURATION = 28800  # 8 ชั่วโมง
-last_download_str = "-"
+last_download_str = "กำลังโหลดข้อมูลเริ่มต้น..."
 STOCK_CACHE = {}
 cache_lock = threading.Lock()
+is_updating = False
 
 # ==========================================
 # 🛠️ ฟังก์ชัน Utility
@@ -82,179 +83,187 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 # ==========================================
-# 🔄 โหลดไฟล์ Excel ด้วยโหมดประหยัด RAM สูงสุด
+# 🔄 โหลดไฟล์ Excel เก็บใน Memory (Low RAM)
 # ==========================================
-def update_excel_cache(creds):
-    global last_download_str, STOCK_CACHE
+def update_excel_cache():
+    global last_download_str, STOCK_CACHE, is_updating
 
-    # เคลียร์ไฟล์เดิม
-    for f in glob.glob("*.xlsx"):
-        if not os.path.basename(f).startswith("~$"):
-            try: os.remove(f)
-            except Exception: pass
+    # ป้องกันการรันซ้อนกันเด็ดขาด (กัน RAM ชนเพดาน)
+    if is_updating:
+        print("⚠️ กำลังมีการอัปเดต Cache อยู่แล้ว ข้ามการทำงานรอบนี้")
+        return False
+    
+    is_updating = True
+    try:
+        creds = get_google_credentials()
 
-    drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
-    query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get('files', [])
+        # เคลียร์ไฟล์ xlsx ชั่วคราว
+        for f in glob.glob("*.xlsx"):
+            if not os.path.basename(f).startswith("~$"):
+                try: os.remove(f)
+                except Exception: pass
 
-    if not files:
-        print("⚠️ ไม่พบไฟล์ Excel ในโฟลเดอร์ Google Drive")
-        return
+        drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
+        query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
+        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
 
-    for file in files:
-        try:
-            req = drive_service.files().get_media(fileId=file['id'])
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, req)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            fh.seek(0)
-            with open(file['name'], 'wb') as f:
-                f.write(fh.read())
-            print(f"✅ ดาวน์โหลด {file['name']} สำเร็จ")
-        except Exception as e:
-            print(f"❌ ดาวน์โหลดล้มเหลว: {e}")
+        if not files:
+            print("⚠️ ไม่พบไฟล์ Excel ใน Google Drive")
+            is_updating = False
+            return False
 
-    new_stock_map = {}
-    hard_exclude = ["total reserve", "น้ำหนัก", "total maintenance", "lot", "eta", "หักจอง", "pr26", "po26", "รถ", "so26"]
+        for file in files:
+            try:
+                req = drive_service.files().get_media(fileId=file['id'])
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, req)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                fh.seek(0)
+                with open(file['name'], 'wb') as f:
+                    f.write(fh.read())
+                print(f"✅ ดาวน์โหลด {file['name']} สำเร็จ")
+            except Exception as e:
+                print(f"❌ ดาวน์โหลดล้มเหลว: {e}")
 
-    for file_path in glob.glob("*.xlsx"):
-        if os.path.basename(file_path).startswith("~$"):
-            continue
+        new_stock_map = {}
+        hard_exclude = ["total reserve", "น้ำหนัก", "total maintenance", "lot", "eta", "หักจอง", "pr26", "po26", "รถ", "so26"]
 
-        try:
-            # 1. สแกนหาสูตรคอลัมน์จอง (เปิดโหมด read_only=True ประหยัด RAM)
-            target_booking_cols = set()
-            wb_formula = openpyxl.load_workbook(file_path, data_only=False, read_only=True)
-            ws_formula = wb_formula.active
+        for file_path in glob.glob("*.xlsx"):
+            if os.path.basename(file_path).startswith("~$"):
+                continue
 
-            for r in range(HEADER_ROW, HEADER_ROW + 300):
-                cell_val = str(ws_formula.cell(row=r, column=BALANCE_COL).value or '')
-                if "+" in cell_val:
-                    cols = re.findall(r'([A-Z]+)\d+', cell_val)
-                    for c in cols:
-                        col_idx = col2num_1based(c)
-                        if col_idx > BALANCE_COL:
-                            target_booking_cols.add(col_idx)
-                    if target_booking_cols:
-                        break
-            wb_formula.close()
+            try:
+                # สแกนสูตรหาคอลัมน์จอง (read_only=True)
+                target_booking_cols = set()
+                wb_formula = openpyxl.load_workbook(file_path, data_only=False, read_only=True)
+                ws_formula = wb_formula.active
 
-            # 2. เปิดโหมด data_only=True เพื่ออ่านค่าจริง
-            wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-            ws = wb.active
+                for r in range(HEADER_ROW, HEADER_ROW + 300):
+                    cell_val = str(ws_formula.cell(row=r, column=BALANCE_COL).value or '')
+                    if "+" in cell_val:
+                        cols = re.findall(r'([A-Z]+)\d+', cell_val)
+                        for c in cols:
+                            col_idx = col2num_1based(c)
+                            if col_idx > BALANCE_COL:
+                                target_booking_cols.add(col_idx)
+                        if target_booking_cols:
+                            break
+                wb_formula.close()
 
-            # อ่านหัวตารางแถว 1-5 สำหรับชื่อโครงการ
-            header_rows_data = []
-            for r in range(1, HEADER_ROW + 1):
-                row_vals = [cell.value for cell in ws[r]]
-                header_rows_data.append(row_vals)
+                # เปิดอ่านค่าจริง (data_only=True)
+                wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+                ws = wb.active
 
-            col_meta = {}
-            for col_idx in target_booking_cols:
-                parts = []
-                for r_idx in range(len(header_rows_data)):
-                    if col_idx - 1 < len(header_rows_data[r_idx]):
-                        val = header_rows_data[r_idx][col_idx - 1]
-                        if val is not None:
-                            s = str(val).strip()
-                            if s.lower() not in ["nan", "none", "c", "e", "null", ""]:
-                                parts.append(s)
-                proj_name = " ".join(parts).strip()
-                if proj_name and not any(kw in proj_name.lower() for kw in hard_exclude):
-                    col_meta[col_idx] = proj_name
+                header_rows_data = []
+                for r in range(1, HEADER_ROW + 1):
+                    header_rows_data.append([cell.value for cell in ws[r]])
 
-            # 3. วนลูปอ่านข้อมูลสินค้าทีละบรรทัด (Streaming ทีละแถว Memory จะคงที่ ไม่พุ่งสูง)
-            for row in ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
-                if not row or len(row) < BALANCE_COL:
-                    continue
+                col_meta = {}
+                for col_idx in target_booking_cols:
+                    parts = []
+                    for r_idx in range(len(header_rows_data)):
+                        if col_idx - 1 < len(header_rows_data[r_idx]):
+                            val = header_rows_data[r_idx][col_idx - 1]
+                            if val is not None:
+                                s = str(val).strip()
+                                if s.lower() not in ["nan", "none", "c", "e", "null", ""]:
+                                    parts.append(s)
+                    proj_name = " ".join(parts).strip()
+                    if proj_name and not any(kw in proj_name.lower() for kw in hard_exclude):
+                        col_meta[col_idx] = proj_name
 
-                code_b = row[CODE_B_COL - 1] if len(row) >= CODE_B_COL else None
-                code_c = row[CODE_C_COL - 1] if len(row) >= CODE_C_COL else None
+                # อ่านทีละแถว (Streaming)
+                for row in ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
+                    if not row or len(row) < BALANCE_COL:
+                        continue
 
-                extracted_codes = []
-                for c_val in [code_b, code_c]:
-                    norm = normalize_code(c_val)
-                    if norm and norm not in ["NAN", "NONE", "0", "CODE"]:
-                        extracted_codes.append(norm)
+                    code_b = row[CODE_B_COL - 1] if len(row) >= CODE_B_COL else None
+                    code_c = row[CODE_C_COL - 1] if len(row) >= CODE_C_COL else None
 
-                if not extracted_codes:
-                    continue
+                    extracted_codes = []
+                    for c_val in [code_b, code_c]:
+                        norm = normalize_code(c_val)
+                        if norm and norm not in ["NAN", "NONE", "0", "CODE"]:
+                            extracted_codes.append(norm)
 
-                desc_val = str(row[DESC_COL - 1]).strip() if len(row) >= DESC_COL and row[DESC_COL - 1] else "-"
-                new_v = clean_num(row[NEW_COL - 1]) if len(row) >= NEW_COL else 0.0
-                old_v = clean_num(row[OLD_COL - 1]) if len(row) >= OLD_COL else 0.0
-                maint_v = clean_num(row[MAINT_COL - 1]) if len(row) >= MAINT_COL else 0.0
-                total_onhand_v = clean_num(row[TOTAL_ONHAND_COL - 1]) if len(row) >= TOTAL_ONHAND_COL else (new_v + old_v + maint_v)
-                balance_v = clean_num(row[BALANCE_COL - 1]) if len(row) >= BALANCE_COL else 0.0
+                    if not extracted_codes:
+                        continue
 
-                proj_bookings = {}
-                for col_idx, proj_name in col_meta.items():
-                    if col_idx - 1 < len(row):
-                        v = clean_num(row[col_idx - 1])
-                        if v > 0:
-                            proj_bookings[proj_name] = int(v)
+                    desc_val = str(row[DESC_COL - 1]).strip() if len(row) >= DESC_COL and row[DESC_COL - 1] else "-"
+                    new_v = clean_num(row[NEW_COL - 1]) if len(row) >= NEW_COL else 0.0
+                    old_v = clean_num(row[OLD_COL - 1]) if len(row) >= OLD_COL else 0.0
+                    maint_v = clean_num(row[MAINT_COL - 1]) if len(row) >= MAINT_COL else 0.0
+                    total_onhand_v = clean_num(row[TOTAL_ONHAND_COL - 1]) if len(row) >= TOTAL_ONHAND_COL else (new_v + old_v + maint_v)
+                    balance_v = clean_num(row[BALANCE_COL - 1]) if len(row) >= BALANCE_COL else 0.0
 
-                item_info = {
-                    'code': str(code_b) if code_b else extracted_codes[0],
-                    'desc': desc_val,
-                    'new': int(new_v) if int(new_v) != 0 else "-",
-                    'old': int(old_v) if int(old_v) != 0 else "-",
-                    'maintenance': int(maint_v) if int(maint_v) != 0 else "-",
-                    'on_hand': int(total_onhand_v),
-                    'balance': int(balance_v),
-                    'total_booked': sum(proj_bookings.values()),
-                    'bookings': proj_bookings
-                }
+                    proj_bookings = {}
+                    for col_idx, proj_name in col_meta.items():
+                        if col_idx - 1 < len(row):
+                            v = clean_num(row[col_idx - 1])
+                            if v > 0:
+                                proj_bookings[proj_name] = int(v)
 
-                for norm_c in extracted_codes:
-                    if norm_c not in new_stock_map:
-                        new_stock_map[norm_c] = item_info
+                    item_info = {
+                        'code': str(code_b) if code_b else extracted_codes[0],
+                        'desc': desc_val,
+                        'new': int(new_v) if int(new_v) != 0 else "-",
+                        'old': int(old_v) if int(old_v) != 0 else "-",
+                        'maintenance': int(maint_v) if int(maint_v) != 0 else "-",
+                        'on_hand': int(total_onhand_v),
+                        'balance': int(balance_v),
+                        'total_booked': sum(proj_bookings.values()),
+                        'bookings': proj_bookings
+                    }
 
-            wb.close()
-            del header_rows_data
-        except Exception as e:
-            print(f"❌ Error processing {file_path}: {e}")
+                    for norm_c in extracted_codes:
+                        if norm_c not in new_stock_map:
+                            new_stock_map[norm_c] = item_info
 
-    with cache_lock:
-        STOCK_CACHE = new_stock_map
+                wb.close()
+                del header_rows_data
+            except Exception as e:
+                print(f"❌ Error processing {file_path}: {e}")
 
-    tz = pytz.timezone('Asia/Bangkok')
-    last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        with cache_lock:
+            STOCK_CACHE = new_stock_map
 
-    gc.collect()
-    print(f"✅ สร้าง Cache สำเร็จ: {len(new_stock_map)} รายการ | Memory ถูกคืนเรียบร้อย")
+        tz = pytz.timezone('Asia/Bangkok')
+        last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+
+        gc.collect()
+        print(f"✅ Cache สำเร็จ: {len(new_stock_map)} รายการ ({last_download_str})")
+        return True
+    finally:
+        is_updating = False
 
 # ==========================================
 # ⚙️ Background Thread & Endpoints
 # ==========================================
 def background_sync_loop():
+    # ให้เวลาเซิร์ฟเวอร์เปิดพอร์ตจนเสร็จสมบูรณ์ก่อน 5 วินาที
+    time.sleep(5)
     while True:
         try:
-            creds = get_google_credentials()
-            update_excel_cache(creds)
+            update_excel_cache()
         except Exception as e:
             print(f"Background Sync Error: {e}")
         time.sleep(CACHE_DURATION)
 
-try:
-    initial_creds = get_google_credentials()
-    update_excel_cache(initial_creds)
-except Exception as e:
-    print(f"Initial sync error: {e}")
-
+# ปล่อยให้ background thread เป็นคนโหลดครั้งแรก เพื่อให้ Render ตรวจพบพอร์ตทันที
 threading.Thread(target=background_sync_loop, daemon=True).start()
+
+@app.route("/", methods=['GET'])
+def index():
+    return "Stock Bot Service is Live!", 200
 
 @app.route("/cron-sync", methods=['GET'])
 def cron_sync():
-    try:
-        creds = get_google_credentials()
-        update_excel_cache(creds)
-        return f"Sync Success at {last_download_str}", 200
-    except Exception as e:
-        return f"Sync Error: {str(e)}", 500
+    # รันอัปเดตใน Thread แยก เพื่อตอบ 200 OK ให้ Cron-job ทันที ไม่ติด Timeout
+    threading.Thread(target=update_excel_cache).start()
+    return f"Triggered sync in background. Current cache time: {last_download_str}", 200
 
 # ==========================================
 # 🔍 การประมวลผลคำสั่งเช็คสต็อก
@@ -278,6 +287,9 @@ def process_order_and_get_summary(user_msg):
     report_items = []
     with cache_lock:
         current_cache = STOCK_CACHE
+
+    if not current_cache:
+        return "⏳ บอทกำลังซิงค์ฐานข้อมูลสต็อกเริ่มต้น กรุณารอประมาณ 1 นาทีแล้วลองพิมพ์ใหม่อีกครั้งครับ"
 
     for raw_code, norm_c, qty_needed in parsed_requests:
         item = current_cache.get(norm_c)
