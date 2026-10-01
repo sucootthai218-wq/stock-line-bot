@@ -19,6 +19,9 @@ from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
+# ==========================================
+# 📌 การตั้งค่า LINE และ Google Drive
+# ==========================================
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -26,7 +29,14 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
-DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
+
+# ระบุ File ID ตรงๆ ของไฟล์ Excel ทั้ง 2 ไฟล์ (ตัดปัญหาไฟล์ .tmp 100%)
+TARGET_EXCEL_FILES = [
+    {"id": "1M7YJzGsNRTSQswyxdHHiDDXAuX1h7U4a", "name": "M9_Scaffold-Formwork.xlsx"},
+    {"id": "1HwUNEZ1wwwne2-ZG0ogluODTdmAAdTSg", "name": "M9_Accessory.xlsx"}
+]
+
+CACHE_FILE = "stock_cache.json"
 
 HEADER_ROW = 4
 CODE_B_INDEX = 1
@@ -39,10 +49,7 @@ TOTAL_ONHAND_COL_INDEX = 61
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-CACHE_DURATION = 28800
-last_download_str = "-"
-STOCK_CACHE = {}
-cache_lock = threading.Lock()
+CACHE_DURATION = 28800  # 8 ชั่วโมง
 is_updating = False
 
 # สูตรคอลัมน์จริงจาก Excel (14,977)
@@ -89,56 +96,47 @@ def get_google_credentials():
     else:
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
+# ==========================================
+# 🔄 ดาวน์โหลดเฉพาะ 2 ไฟล์หลัก และเซฟลง JSON
+# ==========================================
 def update_excel_cache():
-    global last_download_str, STOCK_CACHE, is_updating
+    global is_updating
 
     if is_updating:
+        print("⚠️ กำลังอัปเดตอยู่แล้ว ข้ามรอบนี้")
         return False
     is_updating = True
 
     try:
-        # เคลียร์ไฟล์ชั่วคราวเก่าทิ้ง
-        for f in glob.glob("*.xlsx") + glob.glob("*.tmp"):
-            try: os.remove(f)
-            except Exception: pass
-
         creds = get_google_credentials()
         drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
-        query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
-        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
 
-        # กรองเอาเฉพาะไฟล์ที่ลงท้ายด้วย .xlsx จริงๆ (ไม่เอาไฟล์ขยะ .tmp)
-        valid_files = [f for f in files if f['name'].lower().endswith('.xlsx') and not f['name'].startswith('~$')]
-
-        if not valid_files:
-            print("⚠️ ไม่พบไฟล์ .xlsx ในโฟลเดอร์ Google Drive")
-            return False
-
-        for file in valid_files:
+        # ดาวน์โหลดตรงเฉพาะ 2 ไฟล์เป้าหมาย (เร็วมาก ไม่กินเวลา ไม่เจอไฟล์ .tmp)
+        for target in TARGET_EXCEL_FILES:
             try:
-                req = drive_service.files().get_media(fileId=file['id'])
+                req = drive_service.files().get_media(fileId=target['id'])
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, req)
                 done = False
                 while not done:
                     _, done = downloader.next_chunk()
                 fh.seek(0)
-                with open(file['name'], 'wb') as f:
+                with open(target['name'], 'wb') as f:
                     f.write(fh.read())
-                print(f"✅ ดาวน์โหลดไฟล์จริง {file['name']} สำเร็จ")
+                print(f"✅ ดาวน์โหลด {target['name']} สำเร็จ")
             except Exception as e:
-                print(f"❌ ดาวน์โหลดล้มเหลว: {e}")
+                print(f"❌ ดาวน์โหลด {target['name']} ล้มเหลว: {e}")
 
         new_stock_map = {}
-        all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+        for target in TARGET_EXCEL_FILES:
+            file_path = target['name']
+            if not os.path.exists(file_path):
+                continue
 
-        for file_path in all_xlsx:
             try:
                 df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
                 num_cols = df_raw.shape[1]
 
-                # สกัดชื่อโครงการเฉพาะคอลัมน์ในสูตรจริง
                 col_booking_meta = {}
                 for c in VALID_BOOKING_COLS:
                     if c < num_cols:
@@ -148,7 +146,6 @@ def update_excel_cache():
                         if proj_name and "หักจอง" not in proj_name:
                             col_booking_meta[c] = proj_name
 
-                # วนลูปอ่านข้อมูลสินค้า
                 for r in range(HEADER_ROW + 1, len(df_raw)):
                     extracted_codes = []
                     for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
@@ -195,17 +192,30 @@ def update_excel_cache():
             except Exception as e:
                 print(f"❌ Error {file_path}: {e}")
 
-        with cache_lock:
-            STOCK_CACHE = new_stock_map
-
         tz = pytz.timezone('Asia/Bangkok')
-        last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+
+        # บันทึกข้อมูลลง JSON บนดิสก์ทันที
+        cache_payload = {
+            "last_updated": now_str,
+            "data": new_stock_map
+        }
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_payload, f, ensure_ascii=False)
 
         gc.collect()
-        print(f"✅ สร้าง Cache สำเร็จ: {len(new_stock_map)} รายการ ({last_download_str})")
+        print(f"✅ บันทึก Cache ลง JSON สำเร็จ: {len(new_stock_map)} รายการ ({now_str})")
         return True
     finally:
         is_updating = False
+
+def load_stock_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception: pass
+    return None
 
 def background_sync_loop():
     time.sleep(2)
@@ -243,15 +253,16 @@ def process_order_and_get_summary(user_msg):
     if not parsed_requests:
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nST02"
 
-    with cache_lock:
-        current_cache = STOCK_CACHE
-
-    if not current_cache:
+    cache_payload = load_stock_cache()
+    if not cache_payload or not cache_payload.get("data"):
         return "⏳ บอทกำลังซิงค์ฐานข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองพิมพ์ใหม่อีกครั้งครับ"
 
+    stock_data = cache_payload["data"]
+    last_update_str = cache_payload.get("last_updated", "-")
     report_items = []
+
     for raw_code, norm_c, qty_needed in parsed_requests:
-        item = current_cache.get(norm_c)
+        item = stock_data.get(norm_c)
         if item:
             bal = item['balance']
             shortage = qty_needed if bal < 0 else max(0, qty_needed - bal)
@@ -298,7 +309,7 @@ def process_order_and_get_summary(user_msg):
         else:
             summary_text += "- ติดจอง: -\n"
 
-    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_download_str})"
+    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_update_str})"
     return summary_text
 
 @app.route("/callback", methods=['POST'])
