@@ -8,6 +8,7 @@ import datetime
 import gc
 import pytz
 import io
+import openpyxl
 import pandas as pd
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -73,6 +74,51 @@ def normalize_code(code_str):
         return ""
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
+def col2num(col_str):
+    """แปลงชื่อคอลัมน์ Excel (เช่น DM, DO) เป็น 0-indexed column number"""
+    num = 0
+    for c in col_str.upper():
+        num = num * 26 + (ord(c) - ord('A')) + 1
+    return num - 1
+
+def extract_dynamic_booking_columns(file_path):
+    """
+    อ่านสูตรจริงจากคอลัมน์ Balance ใน Excel แบบ Dynamic
+    เพื่อดึงรายชื่อคอลัมน์จองทั้งหมด แม้ในอนาคตจะมีการเพิ่มหรือแทรกคอลัมน์ใหม่
+    """
+    valid_cols = set()
+    try:
+        # เปิดไฟล์ในโหมดอ่านสูตร (data_only=False) และใช้ read_only เพื่อประหยัด RAM
+        wb = openpyxl.load_workbook(file_path, data_only=False, read_only=True)
+        sheet = wb.active
+        
+        # สุ่มตรวจหาแถวที่มีสูตรผูกไว้ (ตั้งแต่แถวที่ 5 ถึง 300)
+        target_formula = ""
+        for r in range(HEADER_ROW + 1, min(HEADER_ROW + 350, sheet.max_row or 350)):
+            cell_val = str(sheet.cell(row=r, column=BALANCE_COL_INDEX + 1).value or '')
+            if "+" in cell_val or "SUM" in cell_val.upper():
+                target_formula = cell_val
+                break
+        
+        wb.close()
+
+        if target_formula:
+            # ดึงรหัสคอลัมน์ภาษาอังกฤษทั้งหมดออกจากสูตร เช่น DM294 -> DM
+            col_letters = re.findall(r'([A-Z]+)\d+', target_formula)
+            for c in col_letters:
+                c_idx = col2num(c)
+                # คัดกรองเฉพาะคอลัมน์ที่อยู่หลัง BALANCE_COL_INDEX (คอลัมน์การจอง)
+                if c_idx > BALANCE_COL_INDEX:
+                    valid_cols.add(c_idx)
+
+            if valid_cols:
+                print(f"🔍 ตรวจพบสูตรคำนวณการจองอัตโนมัติ: มีทั้งหมด {len(valid_cols)} คอลัมน์")
+                return valid_cols
+    except Exception as e:
+        print(f"⚠️ ไม่สามารถแกะสูตร Dynamic ได้: {e}")
+
+    return None
+
 def get_google_credentials():
     google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
@@ -128,36 +174,35 @@ def update_excel_cache(creds):
 
     for file_path in all_xlsx:
         try:
+            # 1. ถอดรหัสสูตรคอลัมน์จองแบบ Dynamic จากไฟล์ล่าสุดโดยตรง
+            dynamic_booking_cols = extract_dynamic_booking_columns(file_path)
+
             df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
             num_cols = df_raw.shape[1]
 
-            # กรองและสกัดหัวคอลัมน์การจอง โดยตัดคอลัมน์คำนวณภายใน/หักจองออก
+            # 2. กำหนดคอลัมน์เป้าหมาย: ถ้าแกะสูตรได้ให้ใช้ตามสูตร ถ้าแกะไม่ได้ให้ใช้ Smart Step
+            if dynamic_booking_cols:
+                target_booking_cols = sorted(list(dynamic_booking_cols))
+            else:
+                # Fallback: ถ้าแกะสูตรไม่พบ ให้เริ่มที่คอลัมน์ DM (Index 116) และก้าวทีละ 2 คอลัมน์ (คอลัมน์คู่)
+                start_col = 116 if num_cols > 116 else (BALANCE_COL_INDEX + 1)
+                target_booking_cols = [c for c in range(start_col, num_cols, 2)]
+
+            # 3. แมปชื่อหัวตารางโครงการ (เก็บวันที่จอง วันที่ใช้ ชื่องาน)
             col_booking_meta = {}
-            for c in range(BALANCE_COL_INDEX + 1, num_cols):
-                txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
-                header_str = " ".join(txts)
-                header_lower = header_str.lower()
-
-                # คำที่บ่งบอกว่าเป็นคอลัมน์คำนวณภายใน/คอลัมน์ตัดยอด ไม่ใช่รายการจองงานจริง
-                exclude_keywords = [
-                    "total", "reserve", "maintenance", "pending", "import", 
-                    "ek17", "น้ำหนัก", "คงเหลือ", "sale", "rent", 
-                    "หักจอง", "หัก จอง", "balance"
-                ]
-                is_excluded = any(kw in header_lower for kw in exclude_keywords)
-
-                is_booking_col = ("จอง" in header_lower or "po" in header_lower or "ใช้" in header_lower)
-
-                if is_booking_col and not is_excluded:
-                    # เก็บข้อความ วันที่จอง เวลา วันที่ใช้ และชื่อโครงการไว้ครบถ้วน
+            for c in target_booking_cols:
+                if c < num_cols:
+                    txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
                     clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
                     proj_name = " ".join(clean_tokens).strip()
 
-                    # ต้องมีข้อความระบุรายละเอียดและไม่ใช่แค่ตัวเลขหรือคำสั้นๆ
-                    if proj_name and len(proj_name) > 3:
+                    # ป้องกันคอลัมน์คำนวณหักจองหลุดเข้ามา
+                    if proj_name and "หักจอง" not in proj_name:
                         col_booking_meta[c] = proj_name
+                    elif not proj_name:
+                        col_booking_meta[c] = f"Project_Col_{c}"
 
-            # อ่านข้อมูลแถวสินค้า
+            # 4. สแกนแถวข้อมูลสินค้า
             for r in range(HEADER_ROW + 1, len(df_raw)):
                 extracted_codes = []
                 for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
@@ -181,7 +226,7 @@ def update_excel_cache(creds):
 
                 balance_v = clean_num(df_raw.iloc[r, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < num_cols else 0.0
 
-                # ดึงเฉพาะยอดการจองที่มีค่ามากกว่า 0
+                # ดึงยอดจองเฉพาะคอลัมน์ที่มีค่า > 0
                 proj_bookings = {}
                 for col_idx, proj_name in col_booking_meta.items():
                     val = clean_num(df_raw.iloc[r, col_idx])
