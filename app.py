@@ -30,13 +30,10 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# ระบุ File ID ตรงๆ ของไฟล์ Excel ทั้ง 2 ไฟล์ (ตัดปัญหาไฟล์ .tmp 100%)
 TARGET_EXCEL_FILES = [
     {"id": "1M7YJzGsNRTSQswyxdHHiDDXAuX1h7U4a", "name": "M9_Scaffold-Formwork.xlsx"},
     {"id": "1HwUNEZ1wwwne2-ZG0ogluODTdmAAdTSg", "name": "M9_Accessory.xlsx"}
 ]
-
-CACHE_FILE = "stock_cache.json"
 
 HEADER_ROW = 4
 CODE_B_INDEX = 1
@@ -50,9 +47,11 @@ ON_HAND_COL_INDEX = 62
 BALANCE_COL_INDEX = 63
 
 CACHE_DURATION = 28800  # 8 ชั่วโมง
-is_updating = False
+last_download_str = "-"
+STOCK_CACHE = {}
+cache_lock = threading.Lock()
 
-# สูตรคอลัมน์จริงจาก Excel (14,977)
+# สูตรจริงใน Excel สำหรับยอดจอง (14,977)
 EXCEL_BOOKING_FORMULA = (
     "DM294+DO294+DQ294+DS294+DU294+DW294+DY294+EA294+EC294+EE294+EG294+EI294+EK294+EM294+EO294+EQ294+ES294+EU294+EW294+EY294+"
     "FA294+FC294+FE294+FG294+FI294+FK294+FM294+FO294+FQ294+FS294+FU294+FW294+FY294+GA294+GC294+GE294+GG294+GI294+GK294+GM294+"
@@ -97,21 +96,16 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 # ==========================================
-# 🔄 ดาวน์โหลดเฉพาะ 2 ไฟล์หลัก และเซฟลง JSON
+# 🔄 ฟังก์ชันประมวลผลสต็อก
 # ==========================================
 def update_excel_cache():
-    global is_updating
-
-    if is_updating:
-        print("⚠️ กำลังอัปเดตอยู่แล้ว ข้ามรอบนี้")
-        return False
-    is_updating = True
+    global last_download_str, STOCK_CACHE
 
     try:
         creds = get_google_credentials()
         drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
 
-        # ดาวน์โหลดตรงเฉพาะ 2 ไฟล์เป้าหมาย (เร็วมาก ไม่กินเวลา ไม่เจอไฟล์ .tmp)
+        # ดาวน์โหลดตรงเฉพาะ 2 ไฟล์จริง
         for target in TARGET_EXCEL_FILES:
             try:
                 req = drive_service.files().get_media(fileId=target['id'])
@@ -123,7 +117,6 @@ def update_excel_cache():
                 fh.seek(0)
                 with open(target['name'], 'wb') as f:
                     f.write(fh.read())
-                print(f"✅ ดาวน์โหลด {target['name']} สำเร็จ")
             except Exception as e:
                 print(f"❌ ดาวน์โหลด {target['name']} ล้มเหลว: {e}")
 
@@ -192,51 +185,37 @@ def update_excel_cache():
             except Exception as e:
                 print(f"❌ Error {file_path}: {e}")
 
-        tz = pytz.timezone('Asia/Bangkok')
-        now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        with cache_lock:
+            STOCK_CACHE = new_stock_map
 
-        # บันทึกข้อมูลลง JSON บนดิสก์ทันที
-        cache_payload = {
-            "last_updated": now_str,
-            "data": new_stock_map
-        }
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_payload, f, ensure_ascii=False)
+        tz = pytz.timezone('Asia/Bangkok')
+        last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
 
         gc.collect()
-        print(f"✅ บันทึก Cache ลง JSON สำเร็จ: {len(new_stock_map)} รายการ ({now_str})")
-        return True
-    finally:
-        is_updating = False
+        print(f"✅ ซิงค์ข้อมูลสำเร็จ: {len(new_stock_map)} รายการ ({last_download_str})")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในการซิงค์: {e}")
 
-def load_stock_cache():
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception: pass
-    return None
+# ==========================================
+# 🚀 โหลดข้อมูลทันทีก่อนเริ่มแอพ (ใช้เวลาแค่ 3-5 วินาที)
+# ==========================================
+print("🚀 กำลังโหลดฐานข้อมูลสต็อกเริ่มต้น...")
+update_excel_cache()
 
 def background_sync_loop():
-    time.sleep(2)
     while True:
+        time.sleep(CACHE_DURATION)
         try:
+            print("🔄 กำลังอัปเดตข้อมูลตามรอบ...")
             update_excel_cache()
         except Exception as e:
             print(f"Background Sync Error: {e}")
-        time.sleep(CACHE_DURATION)
 
 threading.Thread(target=background_sync_loop, daemon=True).start()
 
-@app.route("/", methods=['GET'])
-def index():
-    return "Stock Bot Service is Live!", 200
-
-@app.route("/cron-sync", methods=['GET'])
-def cron_sync():
-    threading.Thread(target=update_excel_cache).start()
-    return "Triggered sync in background.", 200
-
+# ==========================================
+# 🔍 การประมวลผลคำสั่งเช็คสต็อก
+# ==========================================
 def process_order_and_get_summary(user_msg):
     lines = user_msg.strip().split('\n')
     parsed_requests = []
@@ -253,16 +232,12 @@ def process_order_and_get_summary(user_msg):
     if not parsed_requests:
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nST02"
 
-    cache_payload = load_stock_cache()
-    if not cache_payload or not cache_payload.get("data"):
-        return "⏳ บอทกำลังซิงค์ฐานข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองพิมพ์ใหม่อีกครั้งครับ"
+    with cache_lock:
+        current_cache = STOCK_CACHE
 
-    stock_data = cache_payload["data"]
-    last_update_str = cache_payload.get("last_updated", "-")
     report_items = []
-
     for raw_code, norm_c, qty_needed in parsed_requests:
-        item = stock_data.get(norm_c)
+        item = current_cache.get(norm_c)
         if item:
             bal = item['balance']
             shortage = qty_needed if bal < 0 else max(0, qty_needed - bal)
@@ -309,8 +284,20 @@ def process_order_and_get_summary(user_msg):
         else:
             summary_text += "- ติดจอง: -\n"
 
-    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_update_str})"
+    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_download_str})"
     return summary_text
+
+# ==========================================
+# 📩 LINE Webhook Routes
+# ==========================================
+@app.route("/", methods=['GET'])
+def index():
+    return "Stock Bot Service is Live!", 200
+
+@app.route("/cron-sync", methods=['GET'])
+def cron_sync():
+    threading.Thread(target=update_excel_cache).start()
+    return "Triggered sync in background.", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
