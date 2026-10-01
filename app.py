@@ -31,6 +31,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
 
+CACHE_FILE = "stock_cache.json"
+
 HEADER_ROW = 5  # Excel row index (1-based)
 CODE_B_COL = 2  # Col B
 CODE_C_COL = 3  # Col C
@@ -42,9 +44,6 @@ TOTAL_ONHAND_COL = 62  # Col BJ
 BALANCE_COL = 64       # Col BL
 
 CACHE_DURATION = 28800  # 8 ชั่วโมง
-last_download_str = "กำลังโหลดข้อมูลเริ่มต้น..."
-STOCK_CACHE = {}
-cache_lock = threading.Lock()
 is_updating = False
 
 # ==========================================
@@ -83,21 +82,19 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 # ==========================================
-# 🔄 โหลดไฟล์ Excel เก็บใน Memory (Low RAM)
+# 🔄 โหลดไฟล์ Excel และบันทึกลง JSON Cache
 # ==========================================
 def update_excel_cache():
-    global last_download_str, STOCK_CACHE, is_updating
+    global is_updating
 
-    # ป้องกันการรันซ้อนกันเด็ดขาด (กัน RAM ชนเพดาน)
     if is_updating:
-        print("⚠️ กำลังมีการอัปเดต Cache อยู่แล้ว ข้ามการทำงานรอบนี้")
+        print("⚠️ กำลังมีกระบวนการอัปเดต Cache อยู่แล้ว ข้ามรอบนี้")
         return False
     
     is_updating = True
     try:
         creds = get_google_credentials()
 
-        # เคลียร์ไฟล์ xlsx ชั่วคราว
         for f in glob.glob("*.xlsx"):
             if not os.path.basename(f).startswith("~$"):
                 try: os.remove(f)
@@ -110,7 +107,6 @@ def update_excel_cache():
 
         if not files:
             print("⚠️ ไม่พบไฟล์ Excel ใน Google Drive")
-            is_updating = False
             return False
 
         for file in files:
@@ -136,7 +132,6 @@ def update_excel_cache():
                 continue
 
             try:
-                # สแกนสูตรหาคอลัมน์จอง (read_only=True)
                 target_booking_cols = set()
                 wb_formula = openpyxl.load_workbook(file_path, data_only=False, read_only=True)
                 ws_formula = wb_formula.active
@@ -153,7 +148,6 @@ def update_excel_cache():
                             break
                 wb_formula.close()
 
-                # เปิดอ่านค่าจริง (data_only=True)
                 wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
                 ws = wb.active
 
@@ -175,7 +169,6 @@ def update_excel_cache():
                     if proj_name and not any(kw in proj_name.lower() for kw in hard_exclude):
                         col_meta[col_idx] = proj_name
 
-                # อ่านทีละแถว (Streaming)
                 for row in ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
                     if not row or len(row) < BALANCE_COL:
                         continue
@@ -227,24 +220,38 @@ def update_excel_cache():
             except Exception as e:
                 print(f"❌ Error processing {file_path}: {e}")
 
-        with cache_lock:
-            STOCK_CACHE = new_stock_map
-
         tz = pytz.timezone('Asia/Bangkok')
-        last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+
+        # บันทึกข้อมูลลงเป็นไฟล์ JSON บนเครื่อง เพื่อแชร์ข้อมูลให้ทุก Worker
+        cache_payload = {
+            "last_updated": now_str,
+            "data": new_stock_map
+        }
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_payload, f, ensure_ascii=False)
 
         gc.collect()
-        print(f"✅ Cache สำเร็จ: {len(new_stock_map)} รายการ ({last_download_str})")
+        print(f"✅ บันทึก Cache ลง JSON สำเร็จ: {len(new_stock_map)} รายการ ({now_str})")
         return True
     finally:
         is_updating = False
+
+def load_stock_cache():
+    """โหลดข้อมูลจากไฟล์ JSON ที่เซฟไว้"""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
 
 # ==========================================
 # ⚙️ Background Thread & Endpoints
 # ==========================================
 def background_sync_loop():
-    # ให้เวลาเซิร์ฟเวอร์เปิดพอร์ตจนเสร็จสมบูรณ์ก่อน 5 วินาที
-    time.sleep(5)
+    time.sleep(3)
     while True:
         try:
             update_excel_cache()
@@ -252,7 +259,7 @@ def background_sync_loop():
             print(f"Background Sync Error: {e}")
         time.sleep(CACHE_DURATION)
 
-# ปล่อยให้ background thread เป็นคนโหลดครั้งแรก เพื่อให้ Render ตรวจพบพอร์ตทันที
+# รัน Sync เบื้องหลัง
 threading.Thread(target=background_sync_loop, daemon=True).start()
 
 @app.route("/", methods=['GET'])
@@ -261,9 +268,8 @@ def index():
 
 @app.route("/cron-sync", methods=['GET'])
 def cron_sync():
-    # รันอัปเดตใน Thread แยก เพื่อตอบ 200 OK ให้ Cron-job ทันที ไม่ติด Timeout
     threading.Thread(target=update_excel_cache).start()
-    return f"Triggered sync in background. Current cache time: {last_download_str}", 200
+    return "Triggered sync in background.", 200
 
 # ==========================================
 # 🔍 การประมวลผลคำสั่งเช็คสต็อก
@@ -284,15 +290,16 @@ def process_order_and_get_summary(user_msg):
     if not parsed_requests:
         return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nST02"
 
-    report_items = []
-    with cache_lock:
-        current_cache = STOCK_CACHE
+    cache_payload = load_stock_cache()
+    if not cache_payload or not cache_payload.get("data"):
+        return "⏳ บอทกำลังซิงค์ฐานข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองพิมพ์ใหม่อีกครั้งครับ"
 
-    if not current_cache:
-        return "⏳ บอทกำลังซิงค์ฐานข้อมูลสต็อกเริ่มต้น กรุณารอประมาณ 1 นาทีแล้วลองพิมพ์ใหม่อีกครั้งครับ"
+    stock_data = cache_payload["data"]
+    last_update_str = cache_payload.get("last_updated", "-")
+    report_items = []
 
     for raw_code, norm_c, qty_needed in parsed_requests:
-        item = current_cache.get(norm_c)
+        item = stock_data.get(norm_c)
         if item:
             bal = item['balance']
             shortage = qty_needed if bal < 0 else max(0, qty_needed - bal)
@@ -339,7 +346,7 @@ def process_order_and_get_summary(user_msg):
         else:
             summary_text += "- ติดจอง: -\n"
 
-    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_download_str})"
+    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_update_str})"
     return summary_text
 
 # ==========================================
