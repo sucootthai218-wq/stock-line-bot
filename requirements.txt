@@ -1,13 +1,9 @@
 flask
 gunicorn
 line-bot-sdk
-gspread
 pandas
 openpyxl
-gdown
-google-auth
-google-auth-oauthlib
 google-api-python-client
-requests
-google-cloud-vision
+google-auth
+google-auth-httplib2
 pytz
