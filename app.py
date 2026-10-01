@@ -133,11 +133,14 @@ def update_excel_cache(creds):
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get('files', [])
 
-    if not files:
-        print("⚠️ ไม่พบไฟล์ Excel ใน Google Drive")
+    # กรองเอาเฉพาะไฟล์ .xlsx จริงๆ (ไม่เอาไฟล์ .tmp ขยะ)
+    valid_files = [f for f in files if f['name'].lower().endswith('.xlsx') and not f['name'].startswith('~$')]
+
+    if not valid_files:
+        print("⚠️ ไม่พบไฟล์ Excel (.xlsx) ใน Google Drive")
         return
 
-    for file in files:
+    for file in valid_files:
         file_id = file['id']
         file_name = file['name']
         try:
@@ -164,10 +167,10 @@ def update_excel_cache(creds):
             df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
             num_cols = df_raw.shape[1]
 
-            # กำหนดคำสั่งห้ามผ่าน (ถ้าเจอคอลัมน์พวกนี้ ไม่ใช่การจองเด็ดขาด)
+            # กำหนดคำสั่งห้ามผ่าน (ตัดเฉพาะยอดรวม น้ำหนัก และบิลรับของเข้า)
             hard_exclude = [
                 "total reserve", "น้ำหนัก", "total maintenance", "lot", 
-                "eta", "หักจอง", "pr26", "po26", "รถ", "so26"
+                "eta", "หักจอง", "pr26"
             ]
 
             col_booking_meta = {}
@@ -192,7 +195,6 @@ def update_excel_cache(creds):
                     proj_name = " ".join(clean_tokens).strip()
                     proj_lower = proj_name.lower()
 
-                    # ถ้าชนคอลัมน์ Total Reserve ให้เบรกหยุดอ่านคอลัมน์ถัดไปทันที
                     if "total reserve" in proj_lower or "น้ำหนัก" in proj_lower:
                         break
 
@@ -223,12 +225,17 @@ def update_excel_cache(creds):
 
                 balance_v = clean_num(df_raw.iloc[r, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < num_cols else 0.0
 
-                # ดึงยอดเฉพาะโครงการที่จองจริง
+                # ดึงยอดเฉพาะโครงการที่จองจริง (ถ้าชื่อโครงการซ้ำกัน ให้แยกบรรทัด #2, #3 ไม่เขียนทับ)
                 proj_bookings = {}
                 for col_idx, proj_name in col_booking_meta.items():
                     val = clean_num(df_raw.iloc[r, col_idx])
                     if val > 0:
-                        proj_bookings[proj_name] = int(val)
+                        final_name = proj_name
+                        counter = 2
+                        while final_name in proj_bookings:
+                            final_name = f"{proj_name} #{counter}"
+                            counter += 1
+                        proj_bookings[final_name] = int(val)
 
                 # รวมยอดติดจองจริงของแถวนี้
                 total_booked_calc = sum(proj_bookings.values())
@@ -282,6 +289,10 @@ except Exception as e:
     print(f"เกิดข้อผิดพลาดในการดาวน์โหลดเริ่มต้น: {e}")
 
 threading.Thread(target=background_sync_loop, daemon=True).start()
+
+@app.route("/", methods=['GET'])
+def index():
+    return "Stock Bot Service is Live!", 200
 
 @app.route("/cron-sync", methods=['GET'])
 def cron_sync():
