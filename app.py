@@ -8,7 +8,6 @@ import datetime
 import gc
 import pytz
 import io
-import openpyxl
 import pandas as pd
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -29,12 +28,10 @@ LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 DRIVE_FOLDER_ID = "19DLipG-4_C0qWTOsFGXyJWfhLsNvR4V8"
+
+CACHE_FILE = "stock_cache.json"
 
 HEADER_ROW = 4
 CODE_B_INDEX = 1
@@ -48,14 +45,30 @@ ON_HAND_COL_INDEX = 62
 BALANCE_COL_INDEX = 63
 
 CACHE_DURATION = 28800  # 8 ชั่วโมง
-last_download_time = 0
-last_download_str = "กำลังโหลดข้อมูลเริ่มต้น..."
-is_syncing = False
+is_updating = False
 
-# Global Cache สำหรับเก็บสต็อกสินค้า และข้อมูลโครงการ
-STOCK_CACHE = {}
-PROJECT_CACHE = {}
-cache_lock = threading.Lock()
+# สูตรคอลัมน์จองจริงใน Excel (14,977 ชิ้น) ป้องกัน XML Memory Crash
+EXCEL_BOOKING_FORMULA = (
+    "DM294+DO294+DQ294+DS294+DU294+DW294+DY294+EA294+EC294+EE294+EG294+EI294+EK294+EM294+EO294+EQ294+ES294+EU294+EW294+EY294+"
+    "FA294+FC294+FE294+FG294+FI294+FK294+FM294+FO294+FQ294+FS294+FU294+FW294+FY294+GA294+GC294+GE294+GG294+GI294+GK294+GM294+"
+    "GO294+GQ294+GS294+GU294+GW294+GY294+HA294+HC294+HE294+HW294+HG294+HI294+HK294+HM294+HO294+HQ294+HS294+HU294+HY294+IA294+"
+    "IC294+IE294+IG294+II294+IK294+IM294+IO294+IQ294+IS294+KK294+IU294+KG294+KI294+IW294+IY294+JA294+JC294+JK294+JM294+JO294+"
+    "JQ294+JS294+JU294+JW294+JY294+KA294+KC294+KE294+KM294+KO294+KQ294+KS294+KU294+KW294+KY294+LA294+LC294+LE294+LG294+LI294+"
+    "LK294+LM294+LO294+LQ294+LS294+LU294+LW294+LY294+MA294+MC294+ME294+MG294+MI294+MK294+MM294+MO294+MQ294+MU294+MW294+MY294+"
+    "NA294+JE294+JG294+JI294+NC294+NE294+NO294+NG294+NI294+NK294+NM294+NQ294+NS294+NW294+NY294+OC294+OG294+OK294+OM294+OO294+"
+    "OQ294+OS294+OU294+OW294+OY294+PA294+PC294+PE294+PG294+PI294+PK294+PM294+PO294+PQ294+PS294+PU294+PW294+PY294+QA294+QC294+"
+    "QE294+QQ294+OA294+OE294+OI294+QG294+QI294+QK294+QM294+QO294+QS294+QU294+QW294+QY294+RA294+RC294+RE294+RG294+RI294+RK294+"
+    "RM294+RO294+RQ294+RS294+RU294+RW294+RY294+SA294+SC294+SE294+SG294+SI294+SK294+SM294+SO294+SQ294+SS294+SU294+SW294+SY294+"
+    "TA294+NU294+TC294+TE294+TG294+TI294+TK294+MS294"
+)
+
+def col2num(col_str):
+    num = 0
+    for c in col_str.upper():
+        num = num * 26 + (ord(c) - ord('A')) + 1
+    return num - 1
+
+VALID_BOOKING_COLS = set(col2num(re.sub(r'\d+', '', part).strip()) for part in EXCEL_BOOKING_FORMULA.split('+'))
 
 # ==========================================
 # 🛠️ ฟังก์ชัน Utility
@@ -76,40 +89,6 @@ def normalize_code(code_str):
         return ""
     return re.sub(r'[^A-Z0-9]', '', str(code_str).strip().upper())
 
-def col2num(col_str):
-    num = 0
-    for c in col_str.upper():
-        num = num * 26 + (ord(c) - ord('A')) + 1
-    return num - 1
-
-def extract_dynamic_booking_columns(file_path):
-    """อ่านสูตรจาก Balance ใน Excel เพื่อดูว่าบวกคอลัมน์ไหนบ้าง"""
-    valid_cols = set()
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=False, read_only=True)
-        sheet = wb.active
-        
-        target_formula = ""
-        for r in range(HEADER_ROW + 1, min(HEADER_ROW + 350, sheet.max_row or 350)):
-            cell_val = str(sheet.cell(row=r, column=BALANCE_COL_INDEX + 1).value or '')
-            if "+" in cell_val or "SUM" in cell_val.upper():
-                target_formula = cell_val
-                break
-        wb.close()
-
-        if target_formula:
-            col_letters = re.findall(r'([A-Z]+)\d+', target_formula)
-            for c in col_letters:
-                c_idx = col2num(c)
-                if c_idx > BALANCE_COL_INDEX:
-                    valid_cols.add(c_idx)
-            if valid_cols:
-                return valid_cols
-    except Exception as e:
-        print(f"⚠️ แกะสูตร Dynamic ไม่สำเร็จ: {e}")
-
-    return None
-
 def get_google_credentials():
     google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
@@ -121,33 +100,35 @@ def get_google_credentials():
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 # ==========================================
-# 🔄 การโหลดและประมวลผลไฟล์ Excel เก็บใน Memory
+# 🔄 การโหลดและประมวลผลไฟล์ Excel เก็บลง JSON Disk
 # ==========================================
-def update_excel_cache(creds):
-    global last_download_time, last_download_str, STOCK_CACHE, PROJECT_CACHE, is_syncing
+def update_excel_cache():
+    global is_updating
 
-    if is_syncing:
-        print("⏳ การ Sync กำลังดำเนินการอยู่ ข้ามรอบนี้...")
-        return
-    is_syncing = True
+    if is_updating:
+        print("⏳ กำลังมีการอัปเดต Cache อยู่แล้ว ข้ามรอบนี้...")
+        return False
+    is_updating = True
 
     try:
-        existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
-        for f in existing_xlsx:
-            try: os.remove(f)
-            except Exception: pass
+        # เคลียร์ไฟล์ชั่วคราวเดิม
+        for f in glob.glob("*.xlsx") + glob.glob("*.tmp"):
+            if not os.path.basename(f).startswith("~$"):
+                try: os.remove(f)
+                except Exception: pass
 
+        creds = get_google_credentials()
         drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
         query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
 
+        # กรองเฉพาะไฟล์ .xlsx จริงๆ ไม่เอาไฟล์ขยะ .tmp
         valid_files = [f for f in files if f['name'].lower().endswith('.xlsx') and not f['name'].startswith('~$')]
 
         if not valid_files:
             print("⚠️ ไม่พบไฟล์ Excel (.xlsx) ใน Google Drive")
-            is_syncing = False
-            return
+            return False
 
         for file in valid_files:
             file_id = file['id']
@@ -173,40 +154,27 @@ def update_excel_cache(creds):
 
         for file_path in all_xlsx:
             try:
-                dynamic_booking_cols = extract_dynamic_booking_columns(file_path)
                 df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
                 num_cols = df_raw.shape[1]
 
+                # กรองคอลัมน์ที่ไม่ใช่การจองโครงการออก
                 hard_exclude = [
                     "total reserve", "น้ำหนัก", "total maintenance", "lot", 
                     "eta", "หักจอง", "pr26"
                 ]
 
                 col_booking_meta = {}
-
-                if dynamic_booking_cols:
-                    for c in sorted(list(dynamic_booking_cols)):
-                        if c < num_cols:
-                            txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
-                            clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
-                            proj_name = " ".join(clean_tokens).strip()
-                            proj_lower = proj_name.lower()
-
-                            if proj_name and not any(kw in proj_lower for kw in hard_exclude):
-                                col_booking_meta[c] = proj_name
-                else:
-                    for c in range(116, num_cols, 2):
+                for c in VALID_BOOKING_COLS:
+                    if c < num_cols:
                         txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
                         clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
                         proj_name = " ".join(clean_tokens).strip()
                         proj_lower = proj_name.lower()
 
-                        if "total reserve" in proj_lower or "น้ำหนัก" in proj_lower:
-                            break
-
                         if proj_name and not any(kw in proj_lower for kw in hard_exclude):
                             col_booking_meta[c] = proj_name
 
+                # จัดการชื่อโครงการซ้ำกัน ให้แยกบรรทัด #2, #3
                 unique_col_display_name = {}
                 temp_name_count = {}
                 for col_idx, proj_name in col_booking_meta.items():
@@ -243,19 +211,20 @@ def update_excel_cache(creds):
                     item_code_str = str(df_raw.iloc[r, CODE_B_INDEX]) if CODE_B_INDEX < num_cols and pd.notna(df_raw.iloc[r, CODE_B_INDEX]) else extracted_codes[0]
                     item_desc_str = str(df_raw.iloc[r, DESC_COL_INDEX]) if DESC_COL_INDEX < num_cols and pd.notna(df_raw.iloc[r, DESC_COL_INDEX]) else "-"
 
+                    # 1. รวบรวมยอดจองฝั่งสินค้า (By Product)
                     proj_bookings = {}
                     for col_idx, disp_name in unique_col_display_name.items():
                         val = clean_num(df_raw.iloc[r, col_idx])
                         if val > 0:
                             proj_bookings[disp_name] = int(val)
 
+                            # 2. รวบรวมยอดจองฝั่งโครงการ (By Project)
                             orig_proj_name = col_booking_meta[col_idx]
                             proj_key = f"{file_path}_{col_idx}"
                             if proj_key not in new_project_map:
                                 new_project_map[proj_key] = {
                                     'display_name': disp_name,
                                     'raw_name': orig_proj_name,
-                                    'file': os.path.basename(file_path),
                                     'items': []
                                 }
                             new_project_map[proj_key]['items'].append({
@@ -286,34 +255,49 @@ def update_excel_cache(creds):
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ {file_path}: {e}")
 
-        with cache_lock:
-            STOCK_CACHE = new_stock_map
-            PROJECT_CACHE = new_project_map
-
-        last_download_time = time.time()
         tz = pytz.timezone('Asia/Bangkok')
-        last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+
+        # บันทึกข้อมูลลงเป็นไฟล์ JSON บนเครื่อง เพื่อแชร์ข้อมูลให้ทุก Worker ทันที
+        cache_payload = {
+            "last_updated": now_str,
+            "stock_data": new_stock_map,
+            "project_data": list(new_project_map.values())
+        }
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_payload, f, ensure_ascii=False)
 
         gc.collect()
-        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ: สินค้า {len(new_stock_map)} รายการ, โครงการจอง {len(new_project_map)} คอลัมน์")
+        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] บันทึก Cache ลงไฟล์ JSON สำเร็จ: สินค้า {len(new_stock_map)} รายการ, โครงการจอง {len(new_project_map)} รายการ ({now_str})")
+        return True
     finally:
-        is_syncing = False
+        is_updating = False
+
+def load_stock_cache():
+    """โหลดข้อมูลจากไฟล์ JSON บน Disk ที่ทุก Worker เข้าถึงได้"""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
 
 # ==========================================
 # ⚙️ Background Threads & Endpoints
 # ==========================================
 def background_sync_loop():
-    # ให้เริ่มรอบแรกหลังจากสตาร์ตเซิร์ฟเวอร์เสร็จทันที (ไม่บล็อกพอร์ต)
-    time.sleep(2)
+    # ให้เวลา Gunicorn เปิด Port ก่อน 5 วินาที
+    time.sleep(5)
+    print("🚀 เริ่มต้นการซิงค์ข้อมูล Excel ครั้งแรกในเบื้องหลัง...")
     while True:
         try:
-            creds = get_google_credentials()
-            update_excel_cache(creds)
+            update_excel_cache()
         except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
+            print(f"Background Sync Error: {e}")
         time.sleep(CACHE_DURATION)
 
-# รัน Thread แยกเป็น Background ทันที ไม่ให้บล็อกการบูตของ Web Server
+# รัน Thread แยกเป็น Background
 threading.Thread(target=background_sync_loop, daemon=True).start()
 
 @app.route("/", methods=['GET'])
@@ -322,28 +306,23 @@ def index():
 
 @app.route("/cron-sync", methods=['GET'])
 def cron_sync():
-    def _run():
-        try:
-            creds = get_google_credentials()
-            update_excel_cache(creds)
-        except Exception as e:
-            print(f"Cron Sync Error: {e}")
-
-    threading.Thread(target=_run, daemon=True).start()
-    return f"Triggered Sync successfully (Last updated: {last_download_str})", 200
+    threading.Thread(target=update_excel_cache).start()
+    cache = load_stock_cache()
+    last_str = cache.get("last_updated", "-") if cache else "-"
+    return f"Triggered sync in background. Current cache time: {last_str}", 200
 
 # ==========================================
 # 🔍 การประมวลผลคำสั่งค้นหาตามโครงการ (By Project)
 # ==========================================
 def process_project_query(query_keyword):
     clean_keyword = query_keyword.strip().lower()
-    
-    with cache_lock:
-        current_projects = list(PROJECT_CACHE.values())
-        curr_time_str = last_download_str
+    cache = load_stock_cache()
 
-    if not current_projects:
-        return f"⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+    if not cache or not cache.get("project_data"):
+        return "⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+
+    current_projects = cache["project_data"]
+    curr_time_str = cache.get("last_updated", "-")
 
     matched_projects = []
     for proj in current_projects:
@@ -383,16 +362,15 @@ def process_order_and_get_summary(user_msg):
             parsed_requests.append((raw_code, norm_c, qty_val))
 
     if not parsed_requests:
-        return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nST02\n\nหรือค้นหาโครงการ เช่น:\nโครงการ T008\nโครงการ PO93"
+        return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nBS2112 1\n\nหรือค้นหาโครงการ เช่น:\nโครงการ T008\nโครงการ PO93"
 
-    report_items = []
-
-    with cache_lock:
-        current_cache = STOCK_CACHE
-        curr_time_str = last_download_str
-
-    if not current_cache:
+    cache = load_stock_cache()
+    if not cache or not cache.get("stock_data"):
         return "⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+
+    current_cache = cache["stock_data"]
+    curr_time_str = cache.get("last_updated", "-")
+    report_items = []
 
     for raw_code, norm_c, qty_needed in parsed_requests:
         item = current_cache.get(norm_c)
