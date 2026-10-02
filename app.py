@@ -51,7 +51,9 @@ CACHE_DURATION = 28800  # 8 ชั่วโมง
 last_download_time = 0
 last_download_str = "-"
 
+# Global Cache สำหรับเก็บสต็อกสินค้า และข้อมูลโครงการ
 STOCK_CACHE = {}
+PROJECT_CACHE = {}
 cache_lock = threading.Lock()
 
 # ==========================================
@@ -121,7 +123,7 @@ def get_google_credentials():
 # 🔄 การโหลดและประมวลผลไฟล์ Excel เก็บใน Memory
 # ==========================================
 def update_excel_cache(creds):
-    global last_download_time, last_download_str, STOCK_CACHE
+    global last_download_time, last_download_str, STOCK_CACHE, PROJECT_CACHE
 
     existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
     for f in existing_xlsx:
@@ -133,7 +135,6 @@ def update_excel_cache(creds):
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get('files', [])
 
-    # กรองเอาเฉพาะไฟล์ .xlsx จริงๆ (ไม่เอาไฟล์ .tmp ขยะ)
     valid_files = [f for f in files if f['name'].lower().endswith('.xlsx') and not f['name'].startswith('~$')]
 
     if not valid_files:
@@ -159,6 +160,7 @@ def update_excel_cache(creds):
             print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
     new_stock_map = {}
+    new_project_map = {}
     all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 
     for file_path in all_xlsx:
@@ -167,7 +169,6 @@ def update_excel_cache(creds):
             df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
             num_cols = df_raw.shape[1]
 
-            # กำหนดคำสั่งห้ามผ่าน (ตัดเฉพาะยอดรวม น้ำหนัก และบิลรับของเข้า)
             hard_exclude = [
                 "total reserve", "น้ำหนัก", "total maintenance", "lot", 
                 "eta", "หักจอง", "pr26"
@@ -187,7 +188,7 @@ def update_excel_cache(creds):
                         if proj_name and not any(kw in proj_lower for kw in hard_exclude):
                             col_booking_meta[c] = proj_name
 
-            # กรณีที่ 2: ถ้าแกะสูตรไม่ได้ (Fallback) ให้เดินทีละ 2 คอลัมน์ และหยุดทันทีเมื่อเจอ "Total Reserve"
+            # กรณีที่ 2: ถ้าแกะสูตรไม่ได้ (Fallback) ให้เดินทีละ 2 คอลัมน์
             else:
                 for c in range(116, num_cols, 2):
                     txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
@@ -201,7 +202,18 @@ def update_excel_cache(creds):
                     if proj_name and not any(kw in proj_lower for kw in hard_exclude):
                         col_booking_meta[c] = proj_name
 
-            # อ่านข้อมูลสต็อกของสินค้าทุกตัว
+            # กำหนดชื่อคอลัมน์ที่ไม่ซ้ำกัน (สำหรับแสดงผลสินค้าแยกบรรทัด)
+            unique_col_display_name = {}
+            temp_name_count = {}
+            for col_idx, proj_name in col_booking_meta.items():
+                if proj_name not in temp_name_count:
+                    temp_name_count[proj_name] = 1
+                    unique_col_display_name[col_idx] = proj_name
+                else:
+                    temp_name_count[proj_name] += 1
+                    unique_col_display_name[col_idx] = f"{proj_name} #{temp_name_count[proj_name]}"
+
+            # อ่านข้อมูลแถวสินค้า
             for r in range(HEADER_ROW + 1, len(df_raw)):
                 extracted_codes = []
                 for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
@@ -225,24 +237,37 @@ def update_excel_cache(creds):
 
                 balance_v = clean_num(df_raw.iloc[r, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < num_cols else 0.0
 
-                # ดึงยอดเฉพาะโครงการที่จองจริง (ถ้าชื่อโครงการซ้ำกัน ให้แยกบรรทัด #2, #3 ไม่เขียนทับ)
+                item_code_str = str(df_raw.iloc[r, CODE_B_INDEX]) if CODE_B_INDEX < num_cols and pd.notna(df_raw.iloc[r, CODE_B_INDEX]) else extracted_codes[0]
+                item_desc_str = str(df_raw.iloc[r, DESC_COL_INDEX]) if DESC_COL_INDEX < num_cols and pd.notna(df_raw.iloc[r, DESC_COL_INDEX]) else "-"
+
+                # 1. รวบรวมยอดจองฝั่งสินค้า (By Product)
                 proj_bookings = {}
-                for col_idx, proj_name in col_booking_meta.items():
+                for col_idx, disp_name in unique_col_display_name.items():
                     val = clean_num(df_raw.iloc[r, col_idx])
                     if val > 0:
-                        final_name = proj_name
-                        counter = 2
-                        while final_name in proj_bookings:
-                            final_name = f"{proj_name} #{counter}"
-                            counter += 1
-                        proj_bookings[final_name] = int(val)
+                        proj_bookings[disp_name] = int(val)
 
-                # รวมยอดติดจองจริงของแถวนี้
+                        # 2. รวบรวมยอดจองฝั่งโครงการ (By Project)
+                        orig_proj_name = col_booking_meta[col_idx]
+                        proj_key = f"{file_path}_{col_idx}"
+                        if proj_key not in new_project_map:
+                            new_project_map[proj_key] = {
+                                'display_name': disp_name,
+                                'raw_name': orig_proj_name,
+                                'file': os.path.basename(file_path),
+                                'items': []
+                            }
+                        new_project_map[proj_key]['items'].append({
+                            'code': item_code_str,
+                            'desc': item_desc_str,
+                            'qty': int(val)
+                        })
+
                 total_booked_calc = sum(proj_bookings.values())
 
                 item_info = {
-                    'code': str(df_raw.iloc[r, CODE_B_INDEX]) if CODE_B_INDEX < num_cols and pd.notna(df_raw.iloc[r, CODE_B_INDEX]) else extracted_codes[0],
-                    'desc': str(df_raw.iloc[r, DESC_COL_INDEX]) if DESC_COL_INDEX < num_cols and pd.notna(df_raw.iloc[r, DESC_COL_INDEX]) else "-",
+                    'code': item_code_str,
+                    'desc': item_desc_str,
                     'new': int(new_v) if int(new_v) != 0 else "-",
                     'old': int(old_v) if int(old_v) != 0 else "-",
                     'maintenance': int(maint_v) if int(maint_v) != 0 else "-",
@@ -262,13 +287,14 @@ def update_excel_cache(creds):
 
     with cache_lock:
         STOCK_CACHE = new_stock_map
+        PROJECT_CACHE = new_project_map
 
     last_download_time = time.time()
     tz = pytz.timezone('Asia/Bangkok')
     last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
 
     gc.collect()
-    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ: {len(new_stock_map)} รายการ")
+    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ: สินค้า {len(new_stock_map)} รายการ, โครงการจอง {len(new_project_map)} คอลัมน์")
 
 # ==========================================
 # ⚙️ Background Threads & Endpoints
@@ -304,7 +330,40 @@ def cron_sync():
         return f"Sync Error: {str(e)}", 500
 
 # ==========================================
-# 🔍 การประมวลผลคำสั่งเช็คสต็อก
+# 🔍 การประมวลผลคำสั่งค้นหาตามโครงการ (By Project)
+# ==========================================
+def process_project_query(query_keyword):
+    clean_keyword = query_keyword.strip().lower()
+    
+    with cache_lock:
+        current_projects = list(PROJECT_CACHE.values())
+        curr_time_str = last_download_str
+
+    matched_projects = []
+    for proj in current_projects:
+        # ค้นหาคำค้นหาในชื่อเต็มของโครงการ
+        if clean_keyword in proj['raw_name'].lower() or clean_keyword in proj['display_name'].lower():
+            if proj['items']:
+                matched_projects.append(proj)
+
+    if not matched_projects:
+        return f"❌ ไม่พบโครงการที่ตรงกับคำค้นหา: '{query_keyword}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+
+    # จัดรูปแบบข้อความรายงานโครงการ
+    report_text = f"📋 รายการจองโครงการ: '{query_keyword}'\n"
+    for idx, proj in enumerate(matched_projects, 1):
+        total_qty = sum(item['qty'] for item in proj['items'])
+        report_text += f"\n📌 [{idx}] {proj['display_name']}\n"
+        report_text += f"🔢 รวมจอง: {len(proj['items'])} รายการ ({total_qty:,} ชิ้น)\n"
+        report_text += "-------------------------\n"
+        for item in proj['items']:
+            report_text += f"   • {item['code']} ({item['desc']}): {item['qty']:,} ชิ้น\n"
+
+    report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    return report_text
+
+# ==========================================
+# 🔍 การประมวลผลคำสั่งเช็คสต็อกสินค้า (By Product)
 # ==========================================
 def process_order_and_get_summary(user_msg):
     lines = user_msg.strip().split('\n')
@@ -320,12 +379,13 @@ def process_order_and_get_summary(user_msg):
             parsed_requests.append((raw_code, norm_c, qty_val))
 
     if not parsed_requests:
-        return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nST02"
+        return "❌ กรุณาระบุรหัสสินค้าที่ต้องการตรวจสอบ เช่น:\nST01 100\nST02\n\nหรือค้นหาโครงการ เช่น:\nโครงการ T008\nโครงการ PO93"
 
     report_items = []
 
     with cache_lock:
         current_cache = STOCK_CACHE
+        curr_time_str = last_download_str
 
     for raw_code, norm_c, qty_needed in parsed_requests:
         item = current_cache.get(norm_c)
@@ -359,7 +419,6 @@ def process_order_and_get_summary(user_msg):
                 'bookings': {}
             })
 
-    # ประกอบข้อความสรุปรายงาน
     summary_text = "📊 รายงานสรุปสต็อก:\n"
     for item in report_items:
         summary_text += f"\n📦 {item['code']} ({item['desc']})\n"
@@ -377,11 +436,11 @@ def process_order_and_get_summary(user_msg):
         else:
             summary_text += "- ติดจอง: -\n"
 
-    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {last_download_str})"
+    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
     return summary_text
 
 # ==========================================
-# 📩 LINE Webhook Routes
+# 📩 LINE Webhook Routes & Router
 # ==========================================
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -395,10 +454,29 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    raw_text = event.message.text.strip()
+    
+    # ดักจับคำสั่งค้นหาตามโครงการ
+    project_prefixes = ["โครงการ", "project", "pj", "งาน"]
+    is_project_query = False
+    keyword = ""
+
+    for prefix in project_prefixes:
+        # เช็คคำนำหน้า เช่น "โครงการ PO93" หรือ "โครงการ: PO93"
+        pattern = rf"^{prefix}[:\s]+(.+)$"
+        match = re.match(pattern, raw_text, re.IGNORECASE)
+        if match:
+            is_project_query = True
+            keyword = match.group(1).strip()
+            break
+
     try:
-        reply = process_order_and_get_summary(event.message.text)
+        if is_project_query and keyword:
+            reply = process_project_query(keyword)
+        else:
+            reply = process_order_and_get_summary(raw_text)
     except Exception as e:
-        reply = f"❌ เกิดข้อผิดพลาดในการค้นหา: {str(e)}"
+        reply = f"❌ เกิดข้อผิดพลาดในการประมวลผล: {str(e)}"
     
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
