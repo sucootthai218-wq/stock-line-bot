@@ -49,7 +49,8 @@ BALANCE_COL_INDEX = 63
 
 CACHE_DURATION = 28800  # 8 ชั่วโมง
 last_download_time = 0
-last_download_str = "-"
+last_download_str = "กำลังโหลดข้อมูลเริ่มต้น..."
+is_syncing = False
 
 # Global Cache สำหรับเก็บสต็อกสินค้า และข้อมูลโครงการ
 STOCK_CACHE = {}
@@ -123,183 +124,187 @@ def get_google_credentials():
 # 🔄 การโหลดและประมวลผลไฟล์ Excel เก็บใน Memory
 # ==========================================
 def update_excel_cache(creds):
-    global last_download_time, last_download_str, STOCK_CACHE, PROJECT_CACHE
+    global last_download_time, last_download_str, STOCK_CACHE, PROJECT_CACHE, is_syncing
 
-    existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
-    for f in existing_xlsx:
-        try: os.remove(f)
-        except Exception: pass
-
-    drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
-    query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get('files', [])
-
-    valid_files = [f for f in files if f['name'].lower().endswith('.xlsx') and not f['name'].startswith('~$')]
-
-    if not valid_files:
-        print("⚠️ ไม่พบไฟล์ Excel (.xlsx) ใน Google Drive")
+    if is_syncing:
+        print("⏳ การ Sync กำลังดำเนินการอยู่ ข้ามรอบนี้...")
         return
+    is_syncing = True
 
-    for file in valid_files:
-        file_id = file['id']
-        file_name = file['name']
-        try:
-            request_file = drive_service.files().get_media(fileId=file_id)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request_file)
-            done = False
-            while done is False:
-                status, done = downloader.next_chunk()
+    try:
+        existing_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+        for f in existing_xlsx:
+            try: os.remove(f)
+            except Exception: pass
 
-            fh.seek(0)
-            with open(file_name, 'wb') as f:
-                f.write(fh.read())
-            print(f"✅ ดาวน์โหลดไฟล์ {file_name} สำเร็จ")
-        except Exception as e:
-            print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
+        drive_service = build('drive', 'v3', credentials=creds, static_discovery=False)
+        query = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false"
+        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
 
-    new_stock_map = {}
-    new_project_map = {}
-    all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+        valid_files = [f for f in files if f['name'].lower().endswith('.xlsx') and not f['name'].startswith('~$')]
 
-    for file_path in all_xlsx:
-        try:
-            dynamic_booking_cols = extract_dynamic_booking_columns(file_path)
-            df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
-            num_cols = df_raw.shape[1]
+        if not valid_files:
+            print("⚠️ ไม่พบไฟล์ Excel (.xlsx) ใน Google Drive")
+            is_syncing = False
+            return
 
-            hard_exclude = [
-                "total reserve", "น้ำหนัก", "total maintenance", "lot", 
-                "eta", "หักจอง", "pr26"
-            ]
+        for file in valid_files:
+            file_id = file['id']
+            file_name = file['name']
+            try:
+                request_file = drive_service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request_file)
+                done = False
+                while done is False:
+                    status, done = downloader.next_chunk()
 
-            col_booking_meta = {}
+                fh.seek(0)
+                with open(file_name, 'wb') as f:
+                    f.write(fh.read())
+                print(f"✅ ดาวน์โหลดไฟล์ {file_name} สำเร็จ")
+            except Exception as e:
+                print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
-            # กรณีที่ 1: แกะสูตร Balance ได้
-            if dynamic_booking_cols:
-                for c in sorted(list(dynamic_booking_cols)):
-                    if c < num_cols:
+        new_stock_map = {}
+        new_project_map = {}
+        all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+
+        for file_path in all_xlsx:
+            try:
+                dynamic_booking_cols = extract_dynamic_booking_columns(file_path)
+                df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
+                num_cols = df_raw.shape[1]
+
+                hard_exclude = [
+                    "total reserve", "น้ำหนัก", "total maintenance", "lot", 
+                    "eta", "หักจอง", "pr26"
+                ]
+
+                col_booking_meta = {}
+
+                if dynamic_booking_cols:
+                    for c in sorted(list(dynamic_booking_cols)):
+                        if c < num_cols:
+                            txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
+                            clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
+                            proj_name = " ".join(clean_tokens).strip()
+                            proj_lower = proj_name.lower()
+
+                            if proj_name and not any(kw in proj_lower for kw in hard_exclude):
+                                col_booking_meta[c] = proj_name
+                else:
+                    for c in range(116, num_cols, 2):
                         txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
                         clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
                         proj_name = " ".join(clean_tokens).strip()
                         proj_lower = proj_name.lower()
 
+                        if "total reserve" in proj_lower or "น้ำหนัก" in proj_lower:
+                            break
+
                         if proj_name and not any(kw in proj_lower for kw in hard_exclude):
                             col_booking_meta[c] = proj_name
 
-            # กรณีที่ 2: ถ้าแกะสูตรไม่ได้ (Fallback) ให้เดินทีละ 2 คอลัมน์
-            else:
-                for c in range(116, num_cols, 2):
-                    txts = [str(df_raw.iloc[r, c]).strip() for r in range(0, min(7, len(df_raw))) if pd.notna(df_raw.iloc[r, c])]
-                    clean_tokens = [t for t in txts if t.lower() not in ["nan", "none", "c", "e", "null", ""]]
-                    proj_name = " ".join(clean_tokens).strip()
-                    proj_lower = proj_name.lower()
+                unique_col_display_name = {}
+                temp_name_count = {}
+                for col_idx, proj_name in col_booking_meta.items():
+                    if proj_name not in temp_name_count:
+                        temp_name_count[proj_name] = 1
+                        unique_col_display_name[col_idx] = proj_name
+                    else:
+                        temp_name_count[proj_name] += 1
+                        unique_col_display_name[col_idx] = f"{proj_name} #{temp_name_count[proj_name]}"
 
-                    if "total reserve" in proj_lower or "น้ำหนัก" in proj_lower:
-                        break
+                for r in range(HEADER_ROW + 1, len(df_raw)):
+                    extracted_codes = []
+                    for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
+                        if col_idx < num_cols:
+                            c_val = df_raw.iloc[r, col_idx]
+                            norm_c = normalize_code(c_val)
+                            if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE"]:
+                                extracted_codes.append(norm_c)
 
-                    if proj_name and not any(kw in proj_lower for kw in hard_exclude):
-                        col_booking_meta[c] = proj_name
+                    if not extracted_codes:
+                        continue
 
-            # กำหนดชื่อคอลัมน์ที่ไม่ซ้ำกัน (สำหรับแสดงผลสินค้าแยกบรรทัด)
-            unique_col_display_name = {}
-            temp_name_count = {}
-            for col_idx, proj_name in col_booking_meta.items():
-                if proj_name not in temp_name_count:
-                    temp_name_count[proj_name] = 1
-                    unique_col_display_name[col_idx] = proj_name
-                else:
-                    temp_name_count[proj_name] += 1
-                    unique_col_display_name[col_idx] = f"{proj_name} #{temp_name_count[proj_name]}"
+                    new_v = clean_num(df_raw.iloc[r, NEW_COL_INDEX]) if NEW_COL_INDEX < num_cols else 0.0
+                    old_v = clean_num(df_raw.iloc[r, OLD_COL_INDEX]) if OLD_COL_INDEX < num_cols else 0.0
+                    maint_v = clean_num(df_raw.iloc[r, MAINT_COL_INDEX]) if MAINT_COL_INDEX < num_cols else 0.0
+                    
+                    if TOTAL_ONHAND_COL_INDEX < num_cols:
+                        total_onhand_v = clean_num(df_raw.iloc[r, TOTAL_ONHAND_COL_INDEX])
+                    else:
+                        total_onhand_v = new_v + old_v + maint_v
 
-            # อ่านข้อมูลแถวสินค้า
-            for r in range(HEADER_ROW + 1, len(df_raw)):
-                extracted_codes = []
-                for col_idx in [CODE_B_INDEX, CODE_C_INDEX]:
-                    if col_idx < num_cols:
-                        c_val = df_raw.iloc[r, col_idx]
-                        norm_c = normalize_code(c_val)
-                        if norm_c and norm_c not in ["NAN", "NONE", "0", "CODE"]:
-                            extracted_codes.append(norm_c)
+                    balance_v = clean_num(df_raw.iloc[r, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < num_cols else 0.0
 
-                if not extracted_codes:
-                    continue
+                    item_code_str = str(df_raw.iloc[r, CODE_B_INDEX]) if CODE_B_INDEX < num_cols and pd.notna(df_raw.iloc[r, CODE_B_INDEX]) else extracted_codes[0]
+                    item_desc_str = str(df_raw.iloc[r, DESC_COL_INDEX]) if DESC_COL_INDEX < num_cols and pd.notna(df_raw.iloc[r, DESC_COL_INDEX]) else "-"
 
-                new_v = clean_num(df_raw.iloc[r, NEW_COL_INDEX]) if NEW_COL_INDEX < num_cols else 0.0
-                old_v = clean_num(df_raw.iloc[r, OLD_COL_INDEX]) if OLD_COL_INDEX < num_cols else 0.0
-                maint_v = clean_num(df_raw.iloc[r, MAINT_COL_INDEX]) if MAINT_COL_INDEX < num_cols else 0.0
-                
-                if TOTAL_ONHAND_COL_INDEX < num_cols:
-                    total_onhand_v = clean_num(df_raw.iloc[r, TOTAL_ONHAND_COL_INDEX])
-                else:
-                    total_onhand_v = new_v + old_v + maint_v
+                    proj_bookings = {}
+                    for col_idx, disp_name in unique_col_display_name.items():
+                        val = clean_num(df_raw.iloc[r, col_idx])
+                        if val > 0:
+                            proj_bookings[disp_name] = int(val)
 
-                balance_v = clean_num(df_raw.iloc[r, BALANCE_COL_INDEX]) if BALANCE_COL_INDEX < num_cols else 0.0
+                            orig_proj_name = col_booking_meta[col_idx]
+                            proj_key = f"{file_path}_{col_idx}"
+                            if proj_key not in new_project_map:
+                                new_project_map[proj_key] = {
+                                    'display_name': disp_name,
+                                    'raw_name': orig_proj_name,
+                                    'file': os.path.basename(file_path),
+                                    'items': []
+                                }
+                            new_project_map[proj_key]['items'].append({
+                                'code': item_code_str,
+                                'desc': item_desc_str,
+                                'qty': int(val)
+                            })
 
-                item_code_str = str(df_raw.iloc[r, CODE_B_INDEX]) if CODE_B_INDEX < num_cols and pd.notna(df_raw.iloc[r, CODE_B_INDEX]) else extracted_codes[0]
-                item_desc_str = str(df_raw.iloc[r, DESC_COL_INDEX]) if DESC_COL_INDEX < num_cols and pd.notna(df_raw.iloc[r, DESC_COL_INDEX]) else "-"
+                    total_booked_calc = sum(proj_bookings.values())
 
-                # 1. รวบรวมยอดจองฝั่งสินค้า (By Product)
-                proj_bookings = {}
-                for col_idx, disp_name in unique_col_display_name.items():
-                    val = clean_num(df_raw.iloc[r, col_idx])
-                    if val > 0:
-                        proj_bookings[disp_name] = int(val)
+                    item_info = {
+                        'code': item_code_str,
+                        'desc': item_desc_str,
+                        'new': int(new_v) if int(new_v) != 0 else "-",
+                        'old': int(old_v) if int(old_v) != 0 else "-",
+                        'maintenance': int(maint_v) if int(maint_v) != 0 else "-",
+                        'on_hand': int(total_onhand_v),
+                        'balance': int(balance_v),
+                        'total_booked': int(total_booked_calc),
+                        'bookings': proj_bookings
+                    }
 
-                        # 2. รวบรวมยอดจองฝั่งโครงการ (By Project)
-                        orig_proj_name = col_booking_meta[col_idx]
-                        proj_key = f"{file_path}_{col_idx}"
-                        if proj_key not in new_project_map:
-                            new_project_map[proj_key] = {
-                                'display_name': disp_name,
-                                'raw_name': orig_proj_name,
-                                'file': os.path.basename(file_path),
-                                'items': []
-                            }
-                        new_project_map[proj_key]['items'].append({
-                            'code': item_code_str,
-                            'desc': item_desc_str,
-                            'qty': int(val)
-                        })
+                    for norm_c in extracted_codes:
+                        if norm_c not in new_stock_map:
+                            new_stock_map[norm_c] = item_info
 
-                total_booked_calc = sum(proj_bookings.values())
+                del df_raw
+            except Exception as e:
+                print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ {file_path}: {e}")
 
-                item_info = {
-                    'code': item_code_str,
-                    'desc': item_desc_str,
-                    'new': int(new_v) if int(new_v) != 0 else "-",
-                    'old': int(old_v) if int(old_v) != 0 else "-",
-                    'maintenance': int(maint_v) if int(maint_v) != 0 else "-",
-                    'on_hand': int(total_onhand_v),
-                    'balance': int(balance_v),
-                    'total_booked': int(total_booked_calc),
-                    'bookings': proj_bookings
-                }
+        with cache_lock:
+            STOCK_CACHE = new_stock_map
+            PROJECT_CACHE = new_project_map
 
-                for norm_c in extracted_codes:
-                    if norm_c not in new_stock_map:
-                        new_stock_map[norm_c] = item_info
+        last_download_time = time.time()
+        tz = pytz.timezone('Asia/Bangkok')
+        last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
 
-            del df_raw
-        except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ {file_path}: {e}")
-
-    with cache_lock:
-        STOCK_CACHE = new_stock_map
-        PROJECT_CACHE = new_project_map
-
-    last_download_time = time.time()
-    tz = pytz.timezone('Asia/Bangkok')
-    last_download_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
-
-    gc.collect()
-    print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ: สินค้า {len(new_stock_map)} รายการ, โครงการจอง {len(new_project_map)} คอลัมน์")
+        gc.collect()
+        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ: สินค้า {len(new_stock_map)} รายการ, โครงการจอง {len(new_project_map)} คอลัมน์")
+    finally:
+        is_syncing = False
 
 # ==========================================
 # ⚙️ Background Threads & Endpoints
 # ==========================================
 def background_sync_loop():
+    # ให้เริ่มรอบแรกหลังจากสตาร์ตเซิร์ฟเวอร์เสร็จทันที (ไม่บล็อกพอร์ต)
+    time.sleep(2)
     while True:
         try:
             creds = get_google_credentials()
@@ -308,12 +313,7 @@ def background_sync_loop():
             print(f"เกิดข้อผิดพลาดในการอัปเดต Cache เบื้องหลัง: {e}")
         time.sleep(CACHE_DURATION)
 
-try:
-    initial_creds = get_google_credentials()
-    update_excel_cache(initial_creds)
-except Exception as e:
-    print(f"เกิดข้อผิดพลาดในการดาวน์โหลดเริ่มต้น: {e}")
-
+# รัน Thread แยกเป็น Background ทันที ไม่ให้บล็อกการบูตของ Web Server
 threading.Thread(target=background_sync_loop, daemon=True).start()
 
 @app.route("/", methods=['GET'])
@@ -322,12 +322,15 @@ def index():
 
 @app.route("/cron-sync", methods=['GET'])
 def cron_sync():
-    try:
-        creds = get_google_credentials()
-        update_excel_cache(creds)
-        return f"Sync Success at {last_download_str}", 200
-    except Exception as e:
-        return f"Sync Error: {str(e)}", 500
+    def _run():
+        try:
+            creds = get_google_credentials()
+            update_excel_cache(creds)
+        except Exception as e:
+            print(f"Cron Sync Error: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return f"Triggered Sync successfully (Last updated: {last_download_str})", 200
 
 # ==========================================
 # 🔍 การประมวลผลคำสั่งค้นหาตามโครงการ (By Project)
@@ -339,9 +342,11 @@ def process_project_query(query_keyword):
         current_projects = list(PROJECT_CACHE.values())
         curr_time_str = last_download_str
 
+    if not current_projects:
+        return f"⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+
     matched_projects = []
     for proj in current_projects:
-        # ค้นหาคำค้นหาในชื่อเต็มของโครงการ
         if clean_keyword in proj['raw_name'].lower() or clean_keyword in proj['display_name'].lower():
             if proj['items']:
                 matched_projects.append(proj)
@@ -349,7 +354,6 @@ def process_project_query(query_keyword):
     if not matched_projects:
         return f"❌ ไม่พบโครงการที่ตรงกับคำค้นหา: '{query_keyword}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
 
-    # จัดรูปแบบข้อความรายงานโครงการ
     report_text = f"📋 รายการจองโครงการ: '{query_keyword}'\n"
     for idx, proj in enumerate(matched_projects, 1):
         total_qty = sum(item['qty'] for item in proj['items'])
@@ -386,6 +390,9 @@ def process_order_and_get_summary(user_msg):
     with cache_lock:
         current_cache = STOCK_CACHE
         curr_time_str = last_download_str
+
+    if not current_cache:
+        return "⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
 
     for raw_code, norm_c, qty_needed in parsed_requests:
         item = current_cache.get(norm_c)
@@ -456,13 +463,11 @@ def callback():
 def handle_message(event):
     raw_text = event.message.text.strip()
     
-    # ดักจับคำสั่งค้นหาตามโครงการ
     project_prefixes = ["โครงการ", "project", "pj", "งาน"]
     is_project_query = False
     keyword = ""
 
     for prefix in project_prefixes:
-        # เช็คคำนำหน้า เช่น "โครงการ PO93" หรือ "โครงการ: PO93"
         pattern = rf"^{prefix}[:\s]+(.+)$"
         match = re.match(pattern, raw_text, re.IGNORECASE)
         if match:
