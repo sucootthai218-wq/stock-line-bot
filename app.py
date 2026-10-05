@@ -154,7 +154,7 @@ def update_excel_cache():
 
         for file_path in all_xlsx:
             try:
-                df_raw = pd.read_excel(file_path, header=None, engine='openpyxl')
+                df_raw = pd.read_excel(file_path, sheet_name='Stock', header=None, engine='openpyxl')
                 num_cols = df_raw.shape[1]
 
                 # กรองคอลัมน์ที่ไม่ใช่การจองโครงการออก
