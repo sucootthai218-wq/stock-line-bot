@@ -99,6 +99,33 @@ def get_google_credentials():
     else:
         return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
+def safe_send_reply(reply_token, full_text):
+    """ตัดแบ่งข้อความไม่ให้เกิน 5,000 ตัวอักษร และส่งได้สูงสุด 5 ข้อความใน 1 reply"""
+    MAX_CHAR = 4500
+    if len(full_text) <= MAX_CHAR:
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=full_text))
+        return
+
+    # แบ่งตามบรรทัด
+    lines = full_text.split('\n')
+    chunks = []
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > MAX_CHAR:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = line + "\n"
+        else:
+            current_chunk += line + "\n"
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    # LINE อนุญาตส่งสูงสุด 5 บับเบิ้ลต่อ 1 reply
+    messages_to_send = [TextSendMessage(text=ch) for ch in chunks[:5]]
+    line_bot_api.reply_message(reply_token, messages_to_send)
+
 # ==========================================
 # 🔄 การประมวลผลไฟล์และแคช
 # ==========================================
@@ -319,7 +346,6 @@ def update_excel_cache():
                             proj_bookings[disp_name] = int(val)
 
                             orig_proj_name = col_booking_meta[col_idx]
-                            # ใช้ชื่อ display_name เป็น Key หลัก เพื่อไม่ให้โดนทับ
                             proj_key = disp_name
                             if proj_key not in new_project_map:
                                 new_project_map[proj_key] = {
@@ -495,20 +521,16 @@ def process_category_all_query(category_query):
             f"- ของเก่า: {it['old']}\n"
             f"- maintenance: {it['maintenance']}\n"
         )
-        if len(res_text) + len(item_block) > 4600:
-            res_text += f"\n⚠️ ...และอีก {len(matched_items) - idx + 1} รายการ (แสดงผลจำกัดเพื่อไม่ให้เกินโควต้าข้อความ)"
-            break
         res_text += item_block
 
     res_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
     return res_text
 
 # ==========================================
-# 🔍 3. ฟังก์ชันค้นหาตามโครงการ (ปรับปรุงให้จับ ITA1, ZC03 ได้แน่นอน 100%)
+# 🔍 3. ฟังก์ชันค้นหาตามโครงการ
 # ==========================================
 def process_project_query(query_keyword):
     clean_keyword = query_keyword.strip().lower()
-    # ตัดอักขระพิเศษเพื่อนำมาเทียบจับคู่คำแบบยืดหยุ่น
     clean_kw_norm = re.sub(r'[^a-z0-9]', '', clean_keyword)
     
     cache = load_stock_cache()
@@ -518,7 +540,6 @@ def process_project_query(query_keyword):
     curr_time_str = cache.get("last_updated", "-")
     stock_dict = cache.get("stock_data", {})
     
-    # รวบรวมข้อมูลโครงการตรงจาก bookings ของสินค้าทุกตัวเพื่อความแม่นยำสูงสุด
     aggregated_projects = {}
 
     for item in stock_dict.values():
@@ -529,7 +550,6 @@ def process_project_query(query_keyword):
             
             proj_title_norm = re.sub(r'[^a-z0-9]', '', proj_title.lower())
             
-            # ตรวจสอบว่าตรงกับคำค้นหาหรือไม่ (เช่น ita1, zc03, po93)
             if clean_keyword in proj_title.lower() or (clean_kw_norm and clean_kw_norm in proj_title_norm):
                 if proj_title not in aggregated_projects:
                     aggregated_projects[proj_title] = []
@@ -664,7 +684,7 @@ def handle_message(event):
             reply = process_onsite_query(parts[1])
         else:
             reply = "❌ กรุณาระบุรหัสสินค้าหลัง /n เช่น:\n/n BS2109\n/n WN92P17D\n/n RV31200"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        safe_send_reply(event.reply_token, reply)
         return
 
     # 2. คำสั่ง /ALL [ชื่อกลุ่มสินค้า]
@@ -674,7 +694,7 @@ def handle_message(event):
             reply = process_category_all_query(parts[1])
         else:
             reply = "❌ กรุณาระบุชื่อสินค้าหรือหมวดหลัง /ALL เช่น:\n/ALL Push-pull\n/ALL Vertical"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        safe_send_reply(event.reply_token, reply)
         return
 
     # 3. คำสั่งค้นหาตามโครงการ
@@ -698,7 +718,7 @@ def handle_message(event):
     except Exception as e:
         reply = f"❌ เกิดข้อผิดพลาดในการประมวลผล: {str(e)}"
     
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    safe_send_reply(event.reply_token, reply)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
