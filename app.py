@@ -140,7 +140,7 @@ def update_excel_cache():
             new_meta[file_name] = file_mod
 
             if os.path.exists(file_name) and saved_meta.get(file_name) == file_mod:
-                print(f"⏩ {file_name} ไม่มีการเปลี่ยนแปลง (ข้ามการโหลด)")
+                print(f"⏩ {file_name} ไม่มีการเปลี่ยนแปลง (ข้ามการดาวน์โหลด)")
                 continue
 
             files_changed = True
@@ -169,7 +169,7 @@ def update_excel_cache():
             file_lower = os.path.basename(file_path).lower()
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report (ปรับ Logic การแกะโครงการใหม่)
+            # 1. จัดการไฟล์ Onsite Report (5 หมวดหลัก: Accessory, Accessory Scaffold, Formwork, Scaffold Heavy, Scaffold Light)
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 try:
@@ -179,9 +179,11 @@ def update_excel_cache():
                         print(f"⚠️ ไม่พบชีต 'Onsite Quantity by Project' ใน {file_path}")
                         continue
 
-                    df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1075)
+                    # อ่านถึงคอลัมน์ N (14 คอลัมน์) และ 1,100 แถว
+                    df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1100)
                     num_rows, num_cols = df_onsite.shape
 
+                    # คู่คอลัมน์ทั้ง 5 หมวด: A-B(0,1), D-E(3,4), G-H(6,7), J-K(9,10), M-N(12,13)
                     pair_cols = [(0, 1), (3, 4), (6, 7), (9, 10), (12, 13)]
 
                     for lbl_col, val_col in pair_cols:
@@ -191,7 +193,7 @@ def update_excel_cache():
                         current_item = None
                         waiting_desc = False
 
-                        for r in range(2, num_rows):
+                        for r in range(3, num_rows):
                             raw_label = df_onsite.iloc[r, lbl_col]
                             if pd.isna(raw_label):
                                 continue
@@ -204,42 +206,33 @@ def update_excel_cache():
 
                             val_raw = clean_num(df_onsite.iloc[r, val_col])
 
-                            # ถ้าเจอบรรทัดผลรวมรวมใหญ่ ปิดบล็อก
+                            # หากพบบรรทัดผลรวมรวมใหญ่ จบหมวดนั้น
                             if "ผลรวมทั้งหมด" in clean_label or "total" in clean_label.lower():
                                 current_item = None
                                 waiting_desc = False
                                 continue
 
-                            norm_c = normalize_code(clean_label)
-
-                            # 1. ตรวจจับการขึ้นต้นรหัสสินค้าหลัก
-                            # รหัสสินค้าจะมีความยาวสั้น และในบรรทัดถัดไปจะมี Description มารองรับ
-                            # และมักมีคำว่า 'ผลรวม' อยู่ในบรรทัดเดียวกันหรือมีตัวเลขยอดรวมกำกับ
-                            is_code_format = bool(re.match(r'^(R|S)?[A-Z]{1,4}[0-9]{3,8}[A-Z0-9]*$', norm_c)) and len(clean_label) <= 12 and not any(ch in clean_label for ch in [" ", "/", ":", "."])
-
-                            # ถ้าบรรทัดถัดมาหรือบรรทัดนี้คือ Description
-                            is_desc_format = any(clean_label.startswith(kw) for kw in ["Vertical", "Sub Vertical", "SL-", "Spigot", "Special", "Sping", "U head", "Diagonal", "Jack", "Push-Pull", "Pipe", "C-Clip", "Iron Rack", "Cross Brace", "Ledger"]) or (len(clean_label) > 15 and any(ch in clean_label for ch in [":", "mm", "m", "L:"]))
-
-                            if is_desc_format and current_item:
-                                current_item['desc'] = clean_label
-                                waiting_desc = False
-                                continue
-
-                            # ตรวจสอบว่าเป็น Code หลักใหม่หรือไม่:
-                            # จะเป็น Code ใหม่เมื่อ: ตรงฟอร์แมตรหัสสินค้า และ (ยังไม่มี current_item หรือ บรรทัดถัดไปไม่ใช่โครงการย่อยธรรมดา)
-                            # ในชีต Pivot: บรรทัดถัดจาก Code จะเป็น Description ที่มียอด val_raw เท่ากัน
+                            # ตรวจสอบบรรทัดถัดไป
                             next_r = r + 1
-                            is_main_product_code = False
-                            if is_code_format and next_r < num_rows:
-                                next_label = str(df_onsite.iloc[next_r, lbl_col]).strip()
-                                next_clean = re.sub(r'^[田\-\–\—\s]+', '', next_label).strip()
+                            next_val = -1
+                            next_clean = ""
+                            if next_r < num_rows and pd.notna(df_onsite.iloc[next_r, lbl_col]):
+                                next_clean = re.sub(r'^[田\-\–\—\s]+', '', str(df_onsite.iloc[next_r, lbl_col])).strip()
                                 next_val = clean_num(df_onsite.iloc[next_r, val_col])
-                                
-                                # ถ้าบรรทัดถัดไปมียอดเท่ากัน และเป็นคำอธิบาย -> นี่คือ Code สินค้าหลักแน่นอน!
-                                if (int(val_raw) == int(next_val) and val_raw > 0) or any(next_clean.startswith(kw) for kw in ["Vertical", "Sub Vertical", "SL-", "Spigot", "Special", "Sping", "U head", "Diagonal", "Jack", "Push-Pull", "Pipe", "C-Clip", "Iron Rack", "Cross Brace", "Ledger"]):
-                                    is_main_product_code = True
 
-                            if is_main_product_code:
+                            # เงื่อนไขการตรวจจับรหัสสินค้าหลัก:
+                            # 1. แถวปัจจุบัน และ แถวถัดไป มียอด onsite เท่ากัน (val_raw == next_val)
+                            # 2. แถวปัจจุบันคือ Code สั้น (ไม่เกิน 15 ตัว) และแถวถัดไปคือชื่อคำอธิบายสินค้าที่ยาวกว่า
+                            is_code_like = len(clean_label) <= 15 and not any(ch in clean_label for ch in [" ", "/", ":", "(", ")"])
+                            is_pivot_product_header = (
+                                is_code_like and 
+                                next_val == val_raw and 
+                                val_raw >= 0 and 
+                                len(next_clean) > len(clean_label)
+                            )
+
+                            if is_pivot_product_header:
+                                norm_c = normalize_code(clean_label)
                                 current_item = {
                                     'code': clean_label,
                                     'desc': "-",
@@ -248,8 +241,16 @@ def update_excel_cache():
                                 }
                                 new_onsite_map[norm_c] = current_item
                                 waiting_desc = True
-                            elif current_item:
-                                # เป็นโครงการย่อยภายใต้สินค้าตัวปัจจุบัน
+                                continue
+
+                            # ถ้ากำลังรอ Description ของสินค้าหลักตัวนั้น
+                            if waiting_desc and current_item:
+                                current_item['desc'] = clean_label
+                                waiting_desc = False
+                                continue
+
+                            # ถ้าไม่ใช่ Header สินค้า และไม่ใช่ Description -> คือรหัสโครงการย่อย
+                            if current_item:
                                 proj_name = clean_label
                                 if val_raw > 0 and "ผลรวม" not in proj_name:
                                     current_item['projects'][proj_name] = int(val_raw)
@@ -429,6 +430,7 @@ def process_onsite_query(code_query):
     onsite_dict = cache["onsite_data"]
     curr_time_str = cache.get("last_updated", "-")
 
+    # ค้นหารหัสสินค้า: หาตรงๆ หรือ ตัด/เติม R, S นำหน้า
     target_key = None
     if raw_clean in onsite_dict:
         target_key = raw_clean
@@ -454,7 +456,6 @@ def process_onsite_query(code_query):
     if desc_display == "-" and raw_clean in stock_dict:
         desc_display = stock_dict[raw_clean].get('desc', '-')
 
-    # รวมยอด Onsite จากทุกโครงการย่อย
     total_onsite_calc = sum(projects_dict.values())
     
     res_text = f"📍 รายงานสินค้า Onsite ตามโครงการ:\n"
@@ -565,7 +566,7 @@ def process_order_and_get_summary(user_msg):
         return (
             "📌 คำสั่งที่รองรับ:\n"
             "1. เช็คสต็อกสินค้า: [รหัส] [จำนวน] เช่น V31200 1\n"
-            "2. เช็ค Onsite โครงการ: /n [รหัส] เช่น /n BS2109 หรือ /n V31200\n"
+            "2. เช็ค Onsite โครงการ: /n [รหัส] เช่น /n BS2109 หรือ /n WN92P17D\n"
             "3. เช็คกลุ่มสินค้า: /ALL [ชื่อสินค้า] เช่น /ALL Push-pull\n"
             "4. เช็คของที่จองตามโครงการ: โครงการ [ชื่อโครงการ] เช่น โครงการ PO93"
         )
@@ -653,7 +654,7 @@ def handle_message(event):
         if len(parts) > 1:
             reply = process_onsite_query(parts[1])
         else:
-            reply = "❌ กรุณาระบุรหัสสินค้าหลัง /n เช่น:\n/n BS2109\n/n V31200\n/n RV31200"
+            reply = "❌ กรุณาระบุรหัสสินค้าหลัง /n เช่น:\n/n BS2109\n/n WN92P17D\n/n RV31200"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
