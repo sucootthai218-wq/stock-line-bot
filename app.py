@@ -169,7 +169,7 @@ def update_excel_cache():
             file_lower = os.path.basename(file_path).lower()
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report (5 หมวดหลัก: Accessory, Accessory Scaffold, Formwork, Scaffold Heavy, Scaffold Light)
+            # 1. จัดการไฟล์ Onsite Report (5 หมวดหลัก)
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 try:
@@ -179,11 +179,9 @@ def update_excel_cache():
                         print(f"⚠️ ไม่พบชีต 'Onsite Quantity by Project' ใน {file_path}")
                         continue
 
-                    # อ่านถึงคอลัมน์ N (14 คอลัมน์) และ 1,100 แถว
                     df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1100)
                     num_rows, num_cols = df_onsite.shape
 
-                    # คู่คอลัมน์ทั้ง 5 หมวด: A-B(0,1), D-E(3,4), G-H(6,7), J-K(9,10), M-N(12,13)
                     pair_cols = [(0, 1), (3, 4), (6, 7), (9, 10), (12, 13)]
 
                     for lbl_col, val_col in pair_cols:
@@ -206,13 +204,11 @@ def update_excel_cache():
 
                             val_raw = clean_num(df_onsite.iloc[r, val_col])
 
-                            # หากพบบรรทัดผลรวมรวมใหญ่ จบหมวดนั้น
                             if "ผลรวมทั้งหมด" in clean_label or "total" in clean_label.lower():
                                 current_item = None
                                 waiting_desc = False
                                 continue
 
-                            # ตรวจสอบบรรทัดถัดไป
                             next_r = r + 1
                             next_val = -1
                             next_clean = ""
@@ -220,9 +216,6 @@ def update_excel_cache():
                                 next_clean = re.sub(r'^[田\-\–\—\s]+', '', str(df_onsite.iloc[next_r, lbl_col])).strip()
                                 next_val = clean_num(df_onsite.iloc[next_r, val_col])
 
-                            # เงื่อนไขการตรวจจับรหัสสินค้าหลัก:
-                            # 1. แถวปัจจุบัน และ แถวถัดไป มียอด onsite เท่ากัน (val_raw == next_val)
-                            # 2. แถวปัจจุบันคือ Code สั้น (ไม่เกิน 15 ตัว) และแถวถัดไปคือชื่อคำอธิบายสินค้าที่ยาวกว่า
                             is_code_like = len(clean_label) <= 15 and not any(ch in clean_label for ch in [" ", "/", ":", "(", ")"])
                             is_pivot_product_header = (
                                 is_code_like and 
@@ -243,13 +236,11 @@ def update_excel_cache():
                                 waiting_desc = True
                                 continue
 
-                            # ถ้ากำลังรอ Description ของสินค้าหลักตัวนั้น
                             if waiting_desc and current_item:
                                 current_item['desc'] = clean_label
                                 waiting_desc = False
                                 continue
 
-                            # ถ้าไม่ใช่ Header สินค้า และไม่ใช่ Description -> คือรหัสโครงการย่อย
                             if current_item:
                                 proj_name = clean_label
                                 if val_raw > 0 and "ผลรวม" not in proj_name:
@@ -328,7 +319,8 @@ def update_excel_cache():
                             proj_bookings[disp_name] = int(val)
 
                             orig_proj_name = col_booking_meta[col_idx]
-                            proj_key = f"{file_path}_{col_idx}"
+                            # ใช้ชื่อ display_name เป็น Key หลัก เพื่อไม่ให้โดนทับ
+                            proj_key = disp_name
                             if proj_key not in new_project_map:
                                 new_project_map[proj_key] = {
                                     'display_name': disp_name,
@@ -430,7 +422,6 @@ def process_onsite_query(code_query):
     onsite_dict = cache["onsite_data"]
     curr_time_str = cache.get("last_updated", "-")
 
-    # ค้นหารหัสสินค้า: หาตรงๆ หรือ ตัด/เติม R, S นำหน้า
     target_key = None
     if raw_clean in onsite_dict:
         target_key = raw_clean
@@ -513,35 +504,53 @@ def process_category_all_query(category_query):
     return res_text
 
 # ==========================================
-# 🔍 3. ฟังก์ชันค้นหาตามโครงการ (โครงการ [ชื่อ])
+# 🔍 3. ฟังก์ชันค้นหาตามโครงการ (ปรับปรุงให้จับ ITA1, ZC03 ได้แน่นอน 100%)
 # ==========================================
 def process_project_query(query_keyword):
     clean_keyword = query_keyword.strip().lower()
+    # ตัดอักขระพิเศษเพื่อนำมาเทียบจับคู่คำแบบยืดหยุ่น
+    clean_kw_norm = re.sub(r'[^a-z0-9]', '', clean_keyword)
+    
     cache = load_stock_cache()
-
-    if not cache or not cache.get("project_data"):
+    if not cache:
         return "⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
 
-    current_projects = cache["project_data"]
     curr_time_str = cache.get("last_updated", "-")
+    stock_dict = cache.get("stock_data", {})
+    
+    # รวบรวมข้อมูลโครงการตรงจาก bookings ของสินค้าทุกตัวเพื่อความแม่นยำสูงสุด
+    aggregated_projects = {}
 
-    matched_projects = []
-    for proj in current_projects:
-        if clean_keyword in proj['raw_name'].lower() or clean_keyword in proj['display_name'].lower():
-            if proj['items']:
-                matched_projects.append(proj)
+    for item in stock_dict.values():
+        bookings = item.get('bookings', {})
+        for proj_title, qty in bookings.items():
+            if qty <= 0:
+                continue
+            
+            proj_title_norm = re.sub(r'[^a-z0-9]', '', proj_title.lower())
+            
+            # ตรวจสอบว่าตรงกับคำค้นหาหรือไม่ (เช่น ita1, zc03, po93)
+            if clean_keyword in proj_title.lower() or (clean_kw_norm and clean_kw_norm in proj_title_norm):
+                if proj_title not in aggregated_projects:
+                    aggregated_projects[proj_title] = []
+                
+                aggregated_projects[proj_title].append({
+                    'code': item['code'],
+                    'desc': item['desc'],
+                    'qty': qty
+                })
 
-    if not matched_projects:
+    if not aggregated_projects:
         return f"❌ ไม่พบโครงการที่ตรงกับคำค้นหา: '{query_keyword}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
 
     report_text = f"📋 รายการจองโครงการ: '{query_keyword}'\n"
-    for idx, proj in enumerate(matched_projects, 1):
-        total_qty = sum(item['qty'] for item in proj['items'])
-        report_text += f"\n📌 [{idx}] {proj['display_name']}\n"
-        report_text += f"🔢 รวมจอง: {len(proj['items'])} รายการ ({total_qty:,} ชิ้น)\n"
+    for idx, (proj_name, items) in enumerate(aggregated_projects.items(), 1):
+        total_qty = sum(it['qty'] for it in items)
+        report_text += f"\n📌 [{idx}] {proj_name}\n"
+        report_text += f"🔢 รวมจอง: {len(items)} รายการ ({total_qty:,} ชิ้น)\n"
         report_text += "-------------------------\n"
-        for item in proj['items']:
-            report_text += f"   • {item['code']} ({item['desc']}): {item['qty']:,} ชิ้น\n"
+        for it in items:
+            report_text += f"   • {it['code']} ({it['desc']}): {it['qty']:,} ชิ้น\n"
 
     report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
     return report_text
@@ -568,7 +577,7 @@ def process_order_and_get_summary(user_msg):
             "1. เช็คสต็อกสินค้า: [รหัส] [จำนวน] เช่น V31200 1\n"
             "2. เช็ค Onsite โครงการ: /n [รหัส] เช่น /n BS2109 หรือ /n WN92P17D\n"
             "3. เช็คกลุ่มสินค้า: /ALL [ชื่อสินค้า] เช่น /ALL Push-pull\n"
-            "4. เช็คของที่จองตามโครงการ: โครงการ [ชื่อโครงการ] เช่น โครงการ PO93"
+            "4. เช็คของที่จองตามโครงการ: โครงการ [ชื่อโครงการ] เช่น โครงการ PO93 หรือ pj ITA1"
         )
 
     cache = load_stock_cache()
