@@ -48,7 +48,6 @@ BALANCE_COL_INDEX = 63
 CACHE_DURATION = 86400  # 24 ชั่วโมง
 is_updating = False
 
-# ชุดสูตร Excel คอลัมน์จองมาตรฐาน
 EXCEL_BOOKING_FORMULA = (
     "DM294+DO294+DQ294+DS294+DU294+DW294+DY294+EA294+EC294+EE294+EG294+EI294+EK294+EM294+EO294+EQ294+ES294+EU294+EW294+EY294+"
     "FA294+FC294+FE294+FG294+FI294+FK294+FM294+FO294+FQ294+FS294+FU294+FW294+FY294+GA294+GC294+GE294+GG294+GI294+GK294+GM294+"
@@ -141,7 +140,7 @@ def update_excel_cache():
             new_meta[file_name] = file_mod
 
             if os.path.exists(file_name) and saved_meta.get(file_name) == file_mod:
-                print(f"⏩ {file_name} ไม่มีการเปลี่ยนแปลง (ข้ามการโหลดเพื่อประหยัด Bandwidth)")
+                print(f"⏩ {file_name} ไม่มีการเปลี่ยนแปลง (ข้ามการโหลด)")
                 continue
 
             files_changed = True
@@ -161,10 +160,6 @@ def update_excel_cache():
             except Exception as e:
                 print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
-        if not files_changed and os.path.exists(CACHE_FILE):
-            print("✨ ข้อมูลทั้งหมดเป็นเวอร์ชันล่าสุดแล้ว")
-            return True
-
         new_stock_map = {}
         new_project_map = {}
         new_onsite_map = {}
@@ -174,7 +169,7 @@ def update_excel_cache():
             file_lower = os.path.basename(file_path).lower()
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report
+            # 1. จัดการไฟล์ Onsite Report (ปรับ Logic การแกะโครงการใหม่)
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 try:
@@ -184,7 +179,6 @@ def update_excel_cache():
                         print(f"⚠️ ไม่พบชีต 'Onsite Quantity by Project' ใน {file_path}")
                         continue
 
-                    # อ่านถึงคอลัมน์ N และแถว 1075
                     df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1075)
                     num_rows, num_cols = df_onsite.shape
 
@@ -194,50 +188,71 @@ def update_excel_cache():
                         if val_col >= num_cols:
                             continue
 
-                        current_code = None
-                        current_total = 0
-                        current_desc = "-"
+                        current_item = None
+                        waiting_desc = False
 
                         for r in range(2, num_rows):
                             raw_label = df_onsite.iloc[r, lbl_col]
                             if pd.isna(raw_label):
                                 continue
 
-                            clean_label = str(raw_label).strip().replace("ป้ายชื่อแถว", "").strip()
-                            clean_label = re.sub(r'^[田\-\–\—\s]+', '', clean_label).strip()
+                            label_str = str(raw_label).strip()
+                            clean_label = re.sub(r'^[田\-\–\—\s]+', '', label_str).replace("ป้ายชื่อแถว", "").strip()
 
                             if not clean_label or clean_label.lower() in ["nan", "none"]:
                                 continue
 
                             val_raw = clean_num(df_onsite.iloc[r, val_col])
-                            norm_candidate = normalize_code(clean_label)
 
-                            # ตรวจจับว่าบรรทัดนี้คือรหัสสินค้า (เช่น RV31200, RBS2112, AC00001, RD60615)
-                            is_code = bool(re.match(r'^(R|S)?[A-Z]{1,4}[0-9]{3,8}[A-Z0-9]*$', norm_candidate)) and "ผลรวม" not in clean_label
+                            # ถ้าเจอบรรทัดผลรวมรวมใหญ่ ปิดบล็อก
+                            if "ผลรวมทั้งหมด" in clean_label or "total" in clean_label.lower():
+                                current_item = None
+                                waiting_desc = False
+                                continue
 
-                            if is_code and len(clean_label) <= 12 and not any(ch in clean_label for ch in [" ", "/"]):
-                                current_code = norm_candidate
-                                current_total = int(val_raw)
-                                current_desc = "-"
+                            norm_c = normalize_code(clean_label)
+
+                            # 1. ตรวจจับการขึ้นต้นรหัสสินค้าหลัก
+                            # รหัสสินค้าจะมีความยาวสั้น และในบรรทัดถัดไปจะมี Description มารองรับ
+                            # และมักมีคำว่า 'ผลรวม' อยู่ในบรรทัดเดียวกันหรือมีตัวเลขยอดรวมกำกับ
+                            is_code_format = bool(re.match(r'^(R|S)?[A-Z]{1,4}[0-9]{3,8}[A-Z0-9]*$', norm_c)) and len(clean_label) <= 12 and not any(ch in clean_label for ch in [" ", "/", ":", "."])
+
+                            # ถ้าบรรทัดถัดมาหรือบรรทัดนี้คือ Description
+                            is_desc_format = any(clean_label.startswith(kw) for kw in ["Vertical", "Sub Vertical", "SL-", "Spigot", "Special", "Sping", "U head", "Diagonal", "Jack", "Push-Pull", "Pipe", "C-Clip", "Iron Rack", "Cross Brace", "Ledger"]) or (len(clean_label) > 15 and any(ch in clean_label for ch in [":", "mm", "m", "L:"]))
+
+                            if is_desc_format and current_item:
+                                current_item['desc'] = clean_label
+                                waiting_desc = False
+                                continue
+
+                            # ตรวจสอบว่าเป็น Code หลักใหม่หรือไม่:
+                            # จะเป็น Code ใหม่เมื่อ: ตรงฟอร์แมตรหัสสินค้า และ (ยังไม่มี current_item หรือ บรรทัดถัดไปไม่ใช่โครงการย่อยธรรมดา)
+                            # ในชีต Pivot: บรรทัดถัดจาก Code จะเป็น Description ที่มียอด val_raw เท่ากัน
+                            next_r = r + 1
+                            is_main_product_code = False
+                            if is_code_format and next_r < num_rows:
+                                next_label = str(df_onsite.iloc[next_r, lbl_col]).strip()
+                                next_clean = re.sub(r'^[田\-\–\—\s]+', '', next_label).strip()
+                                next_val = clean_num(df_onsite.iloc[next_r, val_col])
                                 
-                                if current_code not in new_onsite_map:
-                                    new_onsite_map[current_code] = {
-                                        'code': clean_label,
-                                        'desc': "-",
-                                        'total_onsite': current_total,
-                                        'projects': {}
-                                    }
-                            elif current_code:
-                                # หากเป็นบรรทัดถัดจาก Code และยังไม่มี Description
-                                if current_desc == "-" and not re.match(r'^[A-Z]{1,4}\d{2,4}', clean_label):
-                                    current_desc = clean_label
-                                    new_onsite_map[current_code]['desc'] = current_desc
-                                else:
-                                    # เป็นโครงการย่อย
-                                    proj_name = clean_label
-                                    if "ผลรวม" not in proj_name:
-                                        if val_raw > 0:
-                                            new_onsite_map[current_code]['projects'][proj_name] = int(val_raw)
+                                # ถ้าบรรทัดถัดไปมียอดเท่ากัน และเป็นคำอธิบาย -> นี่คือ Code สินค้าหลักแน่นอน!
+                                if (int(val_raw) == int(next_val) and val_raw > 0) or any(next_clean.startswith(kw) for kw in ["Vertical", "Sub Vertical", "SL-", "Spigot", "Special", "Sping", "U head", "Diagonal", "Jack", "Push-Pull", "Pipe", "C-Clip", "Iron Rack", "Cross Brace", "Ledger"]):
+                                    is_main_product_code = True
+
+                            if is_main_product_code:
+                                current_item = {
+                                    'code': clean_label,
+                                    'desc': "-",
+                                    'total_onsite': int(val_raw),
+                                    'projects': {}
+                                }
+                                new_onsite_map[norm_c] = current_item
+                                waiting_desc = True
+                            elif current_item:
+                                # เป็นโครงการย่อยภายใต้สินค้าตัวปัจจุบัน
+                                proj_name = clean_label
+                                if val_raw > 0 and "ผลรวม" not in proj_name:
+                                    current_item['projects'][proj_name] = int(val_raw)
 
                     print(f"✅ ประมวลผลชีต Onsite สำเร็จ: พบรหัสสินค้า {len(new_onsite_map)} รายการ")
                 except Exception as e:
@@ -414,7 +429,6 @@ def process_onsite_query(code_query):
     onsite_dict = cache["onsite_data"]
     curr_time_str = cache.get("last_updated", "-")
 
-    # ค้นหารหัสสินค้า: หาตรงๆ หรือ ตัด/เติม R, S นำหน้า
     target_key = None
     if raw_clean in onsite_dict:
         target_key = raw_clean
@@ -423,7 +437,6 @@ def process_onsite_query(code_query):
     elif f"S{raw_clean}" in onsite_dict:
         target_key = f"S{raw_clean}"
     else:
-        # กรณีรหัสที่พิมพ์มี R หรือ S ติดมา แต่ในระบบไม่มี
         if raw_clean.startswith(('R', 'S')) and raw_clean[1:] in onsite_dict:
             target_key = raw_clean[1:]
 
@@ -436,20 +449,19 @@ def process_onsite_query(code_query):
     if not projects_dict:
         return f"📍 รายงานสินค้า Onsite ตามโครงการ:\n\n📦 {item['code']} ({item['desc']})\nℹ️ ปัจจุบันไม่มีสินค้าค้าง Onsite ในโครงการใด\n\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
 
-    # ดึง Description จาก Stock หลักมาเสริมถ้ายังว่าง
     stock_dict = cache.get("stock_data", {})
     desc_display = item['desc']
     if desc_display == "-" and raw_clean in stock_dict:
         desc_display = stock_dict[raw_clean].get('desc', '-')
 
-    total_onsite = sum(projects_dict.values())
+    # รวมยอด Onsite จากทุกโครงการย่อย
+    total_onsite_calc = sum(projects_dict.values())
     
     res_text = f"📍 รายงานสินค้า Onsite ตามโครงการ:\n"
     res_text += f"\n📦 {item['code']} ({desc_display})\n"
-    res_text += f"🔢 ยอด Onsite รวม: {total_onsite:,} ชิ้น\n"
+    res_text += f"🔢 ยอด Onsite รวม: {total_onsite_calc:,} ชิ้น\n"
     res_text += f"-------------------------\n"
     
-    # แจกแจงโครงการเรียงตามลำดับ (คัดเฉพาะที่มีของ > 0)
     for proj, qty in projects_dict.items():
         res_text += f"   • {proj}: {qty:,} ชิ้น\n"
 
