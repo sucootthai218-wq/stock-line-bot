@@ -106,7 +106,6 @@ def safe_send_reply(reply_token, full_text):
         line_bot_api.reply_message(reply_token, TextSendMessage(text=full_text))
         return
 
-    # แบ่งตามบรรทัด
     lines = full_text.split('\n')
     chunks = []
     current_chunk = ""
@@ -122,7 +121,6 @@ def safe_send_reply(reply_token, full_text):
     if current_chunk.strip():
         chunks.append(current_chunk.strip())
 
-    # LINE อนุญาตส่งสูงสุด 5 บับเบิ้ลต่อ 1 reply
     messages_to_send = [TextSendMessage(text=ch) for ch in chunks[:5]]
     line_bot_api.reply_message(reply_token, messages_to_send)
 
@@ -576,7 +574,45 @@ def process_project_query(query_keyword):
     return report_text
 
 # ==========================================
-# 🔍 4. ฟังก์ชันเช็คสต็อกสินค้าเดี่ยว (ST01 10)
+# 🔍 4. ฟังก์ชันค้นหาสินค้าที่ Balance ติดลบทั้งหมด (/neg หรือ /ติดลบ)
+# ==========================================
+def process_negative_balance_query():
+    cache = load_stock_cache()
+    if not cache or not cache.get("stock_data"):
+        return "⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+
+    stock_dict = cache["stock_data"]
+    curr_time_str = cache.get("last_updated", "-")
+
+    negative_items = []
+    seen_codes = set()
+
+    for item in stock_dict.values():
+        if item['code'] in seen_codes:
+            continue
+        if isinstance(item.get('balance'), (int, float)) and item['balance'] < 0:
+            negative_items.append(item)
+            seen_codes.add(item['code'])
+
+    if not negative_items:
+        return f"✅ ไม่มีสินค้าที่มี Balance ติดลบในระบบเลย\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+
+    # เรียงลำดับจากติดลบมากที่สุด (ขาดมากที่สุด) ไปหาน้อย
+    negative_items.sort(key=lambda x: x['balance'])
+
+    report_text = f"🚨 รายการสินค้าที่ Balance ติดลบทั้งหมด (พบ {len(negative_items)} รายการ):\n"
+    for idx, it in enumerate(negative_items, 1):
+        report_text += (
+            f"\n{idx}. 📦 {it['code']} ({it['desc']})\n"
+            f"   • สต็อก balance: {it['balance']:,} ชิ้น\n"
+            f"   • On hand ปัจจุบัน: {it['on_hand']:,} ชิ้น\n"
+        )
+
+    report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    return report_text
+
+# ==========================================
+# 🔍 5. ฟังก์ชันเช็คสต็อกสินค้าเดี่ยว (ST01 10)
 # ==========================================
 def process_order_and_get_summary(user_msg):
     lines = user_msg.strip().split('\n')
@@ -597,7 +633,8 @@ def process_order_and_get_summary(user_msg):
             "1. เช็คสต็อกสินค้า: [รหัส] [จำนวน] เช่น V31200 1\n"
             "2. เช็ค Onsite โครงการ: /n [รหัส] เช่น /n BS2109 หรือ /n WN92P17D\n"
             "3. เช็คกลุ่มสินค้า: /ALL [ชื่อสินค้า] เช่น /ALL Push-pull\n"
-            "4. เช็คของที่จองตามโครงการ: โครงการ [ชื่อโครงการ] เช่น โครงการ PO93 หรือ pj ITA1"
+            "4. เช็คของที่จองตามโครงการ: โครงการ [ชื่อโครงการ] เช่น โครงการ PO93 หรือ pj ITA1\n"
+            "5. ดูสินค้าติดลบทั้งหมด: /neg หรือ /ติดลบ"
         )
 
     cache = load_stock_cache()
@@ -676,9 +713,16 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     raw_text = event.message.text.strip()
+    clean_lower = raw_text.lower()
     
-    # 1. คำสั่ง /n [รหัสสินค้า]
-    if raw_text.lower().startswith("/n"):
+    # 1. คำสั่งดูสินค้า Balance ติดลบทั้งหมด (/neg, /ติดลบ, ติดลบ)
+    if clean_lower in ["/neg", "/ติดลบ", "ติดลบ", "-balance", "/bal-"]:
+        reply = process_negative_balance_query()
+        safe_send_reply(event.reply_token, reply)
+        return
+
+    # 2. คำสั่ง /n [รหัสสินค้า]
+    if clean_lower.startswith("/n"):
         parts = raw_text.split(maxsplit=1)
         if len(parts) > 1:
             reply = process_onsite_query(parts[1])
@@ -687,8 +731,8 @@ def handle_message(event):
         safe_send_reply(event.reply_token, reply)
         return
 
-    # 2. คำสั่ง /ALL [ชื่อกลุ่มสินค้า]
-    if raw_text.lower().startswith("/all"):
+    # 3. คำสั่ง /ALL [ชื่อกลุ่มสินค้า]
+    if clean_lower.startswith("/all"):
         parts = raw_text.split(maxsplit=1)
         if len(parts) > 1:
             reply = process_category_all_query(parts[1])
@@ -697,7 +741,7 @@ def handle_message(event):
         safe_send_reply(event.reply_token, reply)
         return
 
-    # 3. คำสั่งค้นหาตามโครงการ
+    # 4. คำสั่งค้นหาตามโครงการ
     project_prefixes = ["โครงการ", "project", "pj", "งาน"]
     is_project_query = False
     keyword = ""
