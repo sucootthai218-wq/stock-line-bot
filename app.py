@@ -590,6 +590,7 @@ def process_negative_balance_query():
     for item in stock_dict.values():
         if item['code'] in seen_codes:
             continue
+        # กรองเฉพาะสินค้าที่ balance ติดลบ
         if isinstance(item.get('balance'), (int, float)) and item['balance'] < 0:
             negative_items.append(item)
             seen_codes.add(item['code'])
@@ -600,13 +601,25 @@ def process_negative_balance_query():
     # เรียงลำดับจากติดลบมากที่สุด (ขาดมากที่สุด) ไปหาน้อย
     negative_items.sort(key=lambda x: x['balance'])
 
-    report_text = f"🚨 รายการสินค้าที่ Balance ติดลบทั้งหมด (พบ {len(negative_items)} รายการ):\n"
+    report_text = f"🚨 รายงานสินค้า Balance ติดลบ (พบ {len(negative_items)} รายการ):\n"
     for idx, it in enumerate(negative_items, 1):
-        report_text += (
-            f"\n{idx}. 📦 {it['code']} ({it['desc']})\n"
-            f"   • สต็อก balance: {it['balance']:,} ชิ้น\n"
-            f"   • On hand ปัจจุบัน: {it['on_hand']:,} ชิ้น\n"
-        )
+        report_text += f"\n-----------------------------------\n"
+        report_text += f"[{idx}] 📦 {it['code']}\n"
+        report_text += f"• รายละเอียด: {it['desc']}\n"
+        report_text += f"• On hand: {it['on_hand']:,} ชิ้น\n"
+        report_text += f"• Balance: {it['balance']:,} ชิ้น\n"
+        
+        # ดึงรายการโครงการที่จอง + วันที่ใช้งาน
+        bookings = it.get('bookings', {})
+        if bookings:
+            report_text += f"• โครงการที่จอง + วันที่ใช้งาน:\n"
+            for proj_str, qty in bookings.items():
+                if qty > 0:
+                    clean_proj = proj_str.strip()
+                    clean_proj = re.sub(r'\s*#\d+$', '', clean_proj)
+                    report_text += f"   - {clean_proj} ({qty:,} ชิ้น)\n"
+        else:
+            report_text += f"• โครงการที่จอง: ไม่มีรายการจอง\n"
 
     report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
     return report_text
