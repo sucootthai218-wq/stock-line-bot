@@ -45,7 +45,7 @@ TOTAL_ONHAND_COL_INDEX = 61
 ON_HAND_COL_INDEX = 62       
 BALANCE_COL_INDEX = 63
 
-CACHE_DURATION = 7200  # 2 ชั่วโมง
+CACHE_DURATION = 7200  # ตรวจเช็คทุก 2 ชั่วโมง
 is_updating = False
 
 EXCEL_BOOKING_FORMULA = (
@@ -194,7 +194,7 @@ def update_excel_cache():
             file_lower = os.path.basename(file_path).lower()
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report (5 หมวดหลัก)
+            # 1. จัดการไฟล์ Onsite Report
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 try:
@@ -379,8 +379,22 @@ def update_excel_cache():
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์สต็อก {file_path}: {e}")
 
+        # หาเวลา modifiedTime ล่าสุดของไฟล์จริงจาก Google Drive
+        latest_file_mtime = None
+        for f in valid_files:
+            mtime_str = f.get('modifiedTime')
+            if mtime_str:
+                try:
+                    dt_val = datetime.datetime.fromisoformat(mtime_str.replace('Z', '+00:00'))
+                    if latest_file_mtime is None or dt_val > latest_file_mtime:
+                        latest_file_mtime = dt_val
+                except Exception: pass
+
         tz = pytz.timezone('Asia/Bangkok')
-        now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        if latest_file_mtime:
+            now_str = latest_file_mtime.astimezone(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
+        else:
+            now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
 
         cache_payload = {
             "last_updated": now_str,
@@ -395,7 +409,7 @@ def update_excel_cache():
             json.dump(new_meta, mf, ensure_ascii=False)
 
         gc.collect()
-        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ: สินค้า {len(new_stock_map)} รายการ, จอง {len(new_project_map)} รายการ, Onsite {len(new_onsite_map)} รายการ")
+        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ (เวลาไฟล์: {now_str}): สินค้า {len(new_stock_map)} รายการ")
         return True
     finally:
         is_updating = False
@@ -590,7 +604,6 @@ def process_negative_balance_query():
     for item in stock_dict.values():
         if item['code'] in seen_codes:
             continue
-        # กรองเฉพาะสินค้าที่ balance ติดลบ
         if isinstance(item.get('balance'), (int, float)) and item['balance'] < 0:
             negative_items.append(item)
             seen_codes.add(item['code'])
@@ -598,7 +611,6 @@ def process_negative_balance_query():
     if not negative_items:
         return f"✅ ไม่มีสินค้าที่มี Balance ติดลบในระบบเลย\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
 
-    # เรียงลำดับจากติดลบมากที่สุด (ขาดมากที่สุด) ไปหาน้อย
     negative_items.sort(key=lambda x: x['balance'])
 
     report_text = f"🚨 รายงานสินค้า Balance ติดลบ (พบ {len(negative_items)} รายการ):\n"
@@ -609,7 +621,6 @@ def process_negative_balance_query():
         report_text += f"• On hand: {it['on_hand']:,} ชิ้น\n"
         report_text += f"• Balance: {it['balance']:,} ชิ้น\n"
         
-        # ดึงรายการโครงการที่จอง + วันที่ใช้งาน
         bookings = it.get('bookings', {})
         if bookings:
             report_text += f"• โครงการที่จอง + วันที่ใช้งาน:\n"
