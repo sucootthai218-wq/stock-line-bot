@@ -155,7 +155,6 @@ def update_excel_cache():
                     saved_meta = json.load(mf)
             except Exception: pass
 
-        files_changed = False
         new_meta = {}
 
         for file in valid_files:
@@ -168,7 +167,6 @@ def update_excel_cache():
                 print(f"⏩ {file_name} ไม่มีการเปลี่ยนแปลง (ข้ามการดาวน์โหลด)")
                 continue
 
-            files_changed = True
             try:
                 print(f"📥 กำลังดาวน์โหลด: {file_name}")
                 request_file = drive_service.files().get_media(fileId=file_id)
@@ -190,13 +188,18 @@ def update_excel_cache():
         new_onsite_map = {}
         all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 
+        stock_file_names = []
+        onsite_file_names = []
+
         for file_path in all_xlsx:
             file_lower = os.path.basename(file_path).lower()
+            base_fname = os.path.basename(file_path)
 
             # ----------------------------------------------------
             # 1. จัดการไฟล์ Onsite Report
             # ----------------------------------------------------
             if "onsite" in file_lower:
+                onsite_file_names.append(base_fname)
                 try:
                     xl_file = pd.ExcelFile(file_path, engine='openpyxl')
                     target_sheet = next((s for s in xl_file.sheet_names if 'onsite quantity by project' in s.lower()), None)
@@ -279,6 +282,7 @@ def update_excel_cache():
             # ----------------------------------------------------
             # 2. จัดการไฟล์สต็อกหลัก
             # ----------------------------------------------------
+            stock_file_names.append(base_fname)
             try:
                 xl_file = pd.ExcelFile(file_path, engine='openpyxl')
                 target_sheet = next((s for s in xl_file.sheet_names if 'stock' in s.lower()), 0)
@@ -398,6 +402,8 @@ def update_excel_cache():
 
         cache_payload = {
             "last_updated": now_str,
+            "stock_files": ", ".join(sorted(stock_file_names)) if stock_file_names else "-",
+            "onsite_files": ", ".join(sorted(onsite_file_names)) if onsite_file_names else "-",
             "stock_data": new_stock_map,
             "project_data": list(new_project_map.values()),
             "onsite_data": new_onsite_map
@@ -459,6 +465,7 @@ def process_onsite_query(code_query):
 
     onsite_dict = cache["onsite_data"]
     curr_time_str = cache.get("last_updated", "-")
+    file_ref_str = cache.get("onsite_files", "-")
 
     target_key = None
     if raw_clean in onsite_dict:
@@ -472,13 +479,13 @@ def process_onsite_query(code_query):
             target_key = raw_clean[1:]
 
     if not target_key:
-        return f"❌ ไม่พบรายการ Onsite ของรหัสสินค้า: '{code_query}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+        return f"❌ ไม่พบรายการ Onsite ของรหัสสินค้า: '{code_query}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n📄 อ้างอิงไฟล์: {file_ref_str}"
 
     item = onsite_dict[target_key]
     projects_dict = item.get("projects", {})
 
     if not projects_dict:
-        return f"📍 รายงานสินค้า Onsite ตามโครงการ:\n\n📦 {item['code']} ({item['desc']})\nℹ️ ปัจจุบันไม่มีสินค้าค้าง Onsite ในโครงการใด\n\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+        return f"📍 รายงานสินค้า Onsite ตามโครงการ:\n\n📦 {item['code']} ({item['desc']})\nℹ️ ปัจจุบันไม่มีสินค้าค้าง Onsite ในโครงการใด\n\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n📄 อ้างอิงไฟล์: {file_ref_str}"
 
     stock_dict = cache.get("stock_data", {})
     desc_display = item['desc']
@@ -495,7 +502,8 @@ def process_onsite_query(code_query):
     for proj, qty in projects_dict.items():
         res_text += f"   • {proj}: {qty:,} ชิ้น\n"
 
-    res_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    res_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n"
+    res_text += f"📄 อ้างอิงไฟล์: {file_ref_str}"
     return res_text
 
 # ==========================================
@@ -509,6 +517,7 @@ def process_category_all_query(category_query):
 
     stock_dict = cache["stock_data"]
     curr_time_str = cache.get("last_updated", "-")
+    file_ref_str = cache.get("stock_files", "-")
 
     matched_items = []
     seen_codes = set()
@@ -521,7 +530,7 @@ def process_category_all_query(category_query):
             seen_codes.add(item['code'])
 
     if not matched_items:
-        return f"❌ ไม่พบสินค้าในหมวด: '{category_query}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+        return f"❌ ไม่พบสินค้าในหมวด: '{category_query}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n📄 อ้างอิงไฟล์: {file_ref_str}"
 
     res_text = f"📋 รายการสินค้าหมวด: '{category_query}' (พบ {len(matched_items)} รายการ)\n"
     for idx, it in enumerate(matched_items, 1):
@@ -535,7 +544,8 @@ def process_category_all_query(category_query):
         )
         res_text += item_block
 
-    res_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    res_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n"
+    res_text += f"📄 อ้างอิงไฟล์: {file_ref_str}"
     return res_text
 
 # ==========================================
@@ -550,6 +560,7 @@ def process_project_query(query_keyword):
         return "⏳ ระบบกำลังดาวน์โหลดข้อมูลสต็อกเริ่มต้น กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
 
     curr_time_str = cache.get("last_updated", "-")
+    file_ref_str = cache.get("stock_files", "-")
     stock_dict = cache.get("stock_data", {})
     
     aggregated_projects = {}
@@ -573,7 +584,7 @@ def process_project_query(query_keyword):
                 })
 
     if not aggregated_projects:
-        return f"❌ ไม่พบโครงการที่ตรงกับคำค้นหา: '{query_keyword}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+        return f"❌ ไม่พบโครงการที่ตรงกับคำค้นหา: '{query_keyword}'\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n📄 อ้างอิงไฟล์: {file_ref_str}"
 
     report_text = f"📋 รายการจองโครงการ: '{query_keyword}'\n"
     for idx, (proj_name, items) in enumerate(aggregated_projects.items(), 1):
@@ -584,7 +595,8 @@ def process_project_query(query_keyword):
         for it in items:
             report_text += f"   • {it['code']} ({it['desc']}): {it['qty']:,} ชิ้น\n"
 
-    report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n"
+    report_text += f"📄 อ้างอิงไฟล์: {file_ref_str}"
     return report_text
 
 # ==========================================
@@ -597,6 +609,7 @@ def process_negative_balance_query():
 
     stock_dict = cache["stock_data"]
     curr_time_str = cache.get("last_updated", "-")
+    file_ref_str = cache.get("stock_files", "-")
 
     negative_items = []
     seen_codes = set()
@@ -609,7 +622,7 @@ def process_negative_balance_query():
             seen_codes.add(item['code'])
 
     if not negative_items:
-        return f"✅ ไม่มีสินค้าที่มี Balance ติดลบในระบบเลย\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+        return f"✅ ไม่มีสินค้าที่มี Balance ติดลบในระบบเลย\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n📄 อ้างอิงไฟล์: {file_ref_str}"
 
     negative_items.sort(key=lambda x: x['balance'])
 
@@ -632,7 +645,8 @@ def process_negative_balance_query():
         else:
             report_text += f"• โครงการที่จอง: ไม่มีรายการจอง\n"
 
-    report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    report_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n"
+    report_text += f"📄 อ้างอิงไฟล์: {file_ref_str}"
     return report_text
 
 # ==========================================
@@ -667,6 +681,7 @@ def process_order_and_get_summary(user_msg):
 
     current_cache = cache["stock_data"]
     curr_time_str = cache.get("last_updated", "-")
+    file_ref_str = cache.get("stock_files", "-")
     report_items = []
 
     for raw_code, norm_c, qty_needed in parsed_requests:
@@ -718,7 +733,8 @@ def process_order_and_get_summary(user_msg):
         else:
             summary_text += "- ติดจอง: -\n"
 
-    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})"
+    summary_text += f"\n🕒 (ข้อมูลอัปเดตล่าสุด: {curr_time_str})\n"
+    summary_text += f"📄 อ้างอิงไฟล์: {file_ref_str}"
     return summary_text
 
 # ==========================================
