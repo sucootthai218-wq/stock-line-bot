@@ -183,10 +183,27 @@ def update_excel_cache():
             except Exception as e:
                 print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
+        # ----------------------------------------------------
+        # 🧹 ลบไฟล์ขยะหรือไฟล์เดือนเก่าที่ไม่มีใน Google Drive แล้ว
+        # ----------------------------------------------------
+        valid_drive_filenames = {f['name'] for f in valid_files}
+        local_xlsx_files = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+
+        for local_f in local_xlsx_files:
+            fname = os.path.basename(local_f)
+            if fname not in valid_drive_filenames:
+                try:
+                    os.remove(local_f)
+                    print(f"🧹 ลบไฟล์ตกค้างออกจากเซิร์ฟเวอร์: {fname}")
+                except Exception as e:
+                    print(f"⚠️ ไม่สามารถลบ {fname}: {e}")
+
         new_stock_map = {}
         new_project_map = {}
         new_onsite_map = {}
-        all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+        
+        # กวาดอ่านเฉพาะไฟล์ที่ยังคงอยู่ใน Drive จริงๆ
+        all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$") and os.path.basename(f) in valid_drive_filenames]
 
         stock_file_names = []
         onsite_file_names = []
