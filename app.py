@@ -202,7 +202,6 @@ def update_excel_cache():
         new_project_map = {}
         new_onsite_map = {}
         
-        # กวาดอ่านเฉพาะไฟล์ที่ยังคงอยู่ใน Drive จริงๆ
         all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$") and os.path.basename(f) in valid_drive_filenames]
 
         stock_file_names = []
@@ -213,85 +212,104 @@ def update_excel_cache():
             base_fname = os.path.basename(file_path)
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report
+            # 1. จัดการไฟล์ Onsite Report (ค้นหาชีตและคอลัมน์อัตโนมัติ)
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 onsite_file_names.append(base_fname)
                 try:
                     xl_file = pd.ExcelFile(file_path, engine='openpyxl')
-                    target_sheet = next((s for s in xl_file.sheet_names if 'onsite quantity by project' in s.lower()), None)
-                    if not target_sheet:
-                        print(f"⚠️ ไม่พบชีต 'Onsite Quantity by Project' ใน {file_path}")
-                        continue
+                    
+                    candidate_sheets = [s for s in xl_file.sheet_names if 'onsite' in s.lower() and not s.lower().startswith('total')]
+                    if not candidate_sheets:
+                        candidate_sheets = [s for s in xl_file.sheet_names if 'onsite' in s.lower()]
+                    if not candidate_sheets:
+                        candidate_sheets = [xl_file.sheet_names[0]]
 
-                    df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1100)
-                    num_rows, num_cols = df_onsite.shape
+                    for target_sheet in candidate_sheets:
+                        df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1500)
+                        num_rows, num_cols = df_onsite.shape
 
-                    pair_cols = [(0, 1), (3, 4), (6, 7), (9, 10), (12, 13)]
+                        detected_pairs = []
+                        for r_scan in range(min(15, num_rows)):
+                            for c_scan in range(1, num_cols):
+                                cell_txt = str(df_onsite.iloc[r_scan, c_scan]).strip().lower()
+                                if "ผลรวม" in cell_txt or "onsite" in cell_txt or "ป้ายชื่อ" in cell_txt:
+                                    sample_nums = [clean_num(df_onsite.iloc[rr, c_scan]) for rr in range(r_scan + 1, min(r_scan + 20, num_rows))]
+                                    if any(v > 0 for v in sample_nums):
+                                        pair = (c_scan - 1, c_scan)
+                                        if pair not in detected_pairs:
+                                            detected_pairs.append(pair)
 
-                    for lbl_col, val_col in pair_cols:
-                        if val_col >= num_cols:
-                            continue
+                        if not detected_pairs:
+                            detected_pairs = [(c, c + 1) for c in range(0, num_cols - 1)]
 
-                        current_item = None
-                        waiting_desc = False
-
-                        for r in range(3, num_rows):
-                            raw_label = df_onsite.iloc[r, lbl_col]
-                            if pd.isna(raw_label):
+                        temp_onsite_count = 0
+                        for lbl_col, val_col in detected_pairs:
+                            if val_col >= num_cols or lbl_col < 0:
                                 continue
 
-                            label_str = str(raw_label).strip()
-                            clean_label = re.sub(r'^[田\-\–\—\s]+', '', label_str).replace("ป้ายชื่อแถว", "").strip()
+                            current_item = None
+                            waiting_desc = False
 
-                            if not clean_label or clean_label.lower() in ["nan", "none"]:
-                                continue
+                            for r in range(2, num_rows):
+                                raw_label = df_onsite.iloc[r, lbl_col]
+                                if pd.isna(raw_label):
+                                    continue
 
-                            val_raw = clean_num(df_onsite.iloc[r, val_col])
+                                label_str = str(raw_label).strip()
+                                clean_label = re.sub(r'^[田\-\–\—\s]+', '', label_str).replace("ป้ายชื่อแถว", "").strip()
 
-                            if "ผลรวมทั้งหมด" in clean_label or "total" in clean_label.lower():
-                                current_item = None
-                                waiting_desc = False
-                                continue
+                                if not clean_label or clean_label.lower() in ["nan", "none"]:
+                                    continue
 
-                            next_r = r + 1
-                            next_val = -1
-                            next_clean = ""
-                            if next_r < num_rows and pd.notna(df_onsite.iloc[next_r, lbl_col]):
-                                next_clean = re.sub(r'^[田\-\–\—\s]+', '', str(df_onsite.iloc[next_r, lbl_col])).strip()
-                                next_val = clean_num(df_onsite.iloc[next_r, val_col])
+                                val_raw = clean_num(df_onsite.iloc[r, val_col])
 
-                            is_code_like = len(clean_label) <= 15 and not any(ch in clean_label for ch in [" ", "/", ":", "(", ")"])
-                            is_pivot_product_header = (
-                                is_code_like and 
-                                next_val == val_raw and 
-                                val_raw >= 0 and 
-                                len(next_clean) > len(clean_label)
-                            )
+                                if "ผลรวมทั้งหมด" in clean_label or "grand total" in clean_label.lower():
+                                    current_item = None
+                                    waiting_desc = False
+                                    continue
 
-                            if is_pivot_product_header:
-                                norm_c = normalize_code(clean_label)
-                                current_item = {
-                                    'code': clean_label,
-                                    'desc': "-",
-                                    'total_onsite': int(val_raw),
-                                    'projects': {}
-                                }
-                                new_onsite_map[norm_c] = current_item
-                                waiting_desc = True
-                                continue
+                                next_r = r + 1
+                                next_val = -1
+                                next_clean = ""
+                                if next_r < num_rows and pd.notna(df_onsite.iloc[next_r, lbl_col]):
+                                    next_clean = re.sub(r'^[田\-\–\—\s]+', '', str(df_onsite.iloc[next_r, lbl_col])).strip()
+                                    next_val = clean_num(df_onsite.iloc[next_r, val_col])
 
-                            if waiting_desc and current_item:
-                                current_item['desc'] = clean_label
-                                waiting_desc = False
-                                continue
+                                is_code_like = len(clean_label) <= 15 and not any(ch in clean_label for ch in [" ", "/", ":", "(", ")"])
+                                is_pivot_product_header = (
+                                    is_code_like and 
+                                    next_val == val_raw and 
+                                    val_raw >= 0 and 
+                                    len(next_clean) > len(clean_label)
+                                )
 
-                            if current_item:
-                                proj_name = clean_label
-                                if val_raw > 0 and "ผลรวม" not in proj_name:
-                                    current_item['projects'][proj_name] = int(val_raw)
+                                if is_pivot_product_header:
+                                    norm_c = normalize_code(clean_label)
+                                    current_item = {
+                                        'code': clean_label,
+                                        'desc': "-",
+                                        'total_onsite': int(val_raw),
+                                        'projects': {}
+                                    }
+                                    new_onsite_map[norm_c] = current_item
+                                    temp_onsite_count += 1
+                                    waiting_desc = True
+                                    continue
 
-                    print(f"✅ ประมวลผลชีต Onsite สำเร็จ: พบรหัสสินค้า {len(new_onsite_map)} รายการ")
+                                if waiting_desc and current_item:
+                                    current_item['desc'] = clean_label
+                                    waiting_desc = False
+                                    continue
+
+                                if current_item:
+                                    proj_name = clean_label
+                                    if val_raw > 0 and "ผลรวม" not in proj_name:
+                                        current_item['projects'][proj_name] = int(val_raw)
+
+                        if temp_onsite_count > 0:
+                            print(f"✅ ประมวลผลชีต '{target_sheet}' สำเร็จ: พบรหัสสินค้า {temp_onsite_count} รายการ")
+                            break
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ Onsite ({file_path}): {e}")
                 continue
@@ -432,7 +450,7 @@ def update_excel_cache():
             json.dump(new_meta, mf, ensure_ascii=False)
 
         gc.collect()
-        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ (เวลาไฟล์: {now_str}): สินค้า {len(new_stock_map)} รายการ")
+        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ (เวลาไฟล์: {now_str}): สินค้า {len(new_stock_map)} รายการ, Onsite {len(new_onsite_map)} รายการ")
         return True
     finally:
         is_updating = False
