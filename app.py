@@ -212,40 +212,36 @@ def update_excel_cache():
             base_fname = os.path.basename(file_path)
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report (ค้นหาชีตและคอลัมน์อัตโนมัติ)
+            # 1. จัดการไฟล์ Onsite Report (รองรับทั้งแบบเริ่มคอลัมน์ A และคอลัมน์ B)
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 onsite_file_names.append(base_fname)
                 try:
                     xl_file = pd.ExcelFile(file_path, engine='openpyxl')
                     
-                    candidate_sheets = [s for s in xl_file.sheet_names if 'onsite' in s.lower() and not s.lower().startswith('total')]
-                    if not candidate_sheets:
-                        candidate_sheets = [s for s in xl_file.sheet_names if 'onsite' in s.lower()]
-                    if not candidate_sheets:
-                        candidate_sheets = [xl_file.sheet_names[0]]
+                    # ค้นหาชีต Onsite Quantity by Project ก่อน หากไม่มีค่อยดูชีตอื่นที่มีคำว่า onsite
+                    ordered_sheets = []
+                    for s in xl_file.sheet_names:
+                        if 'onsite quantity by project' in s.lower():
+                            ordered_sheets.insert(0, s)
+                        elif 'onsite' in s.lower() and not s.lower().startswith('total'):
+                            ordered_sheets.append(s)
+                    if not ordered_sheets:
+                        ordered_sheets = xl_file.sheet_names
 
-                    for target_sheet in candidate_sheets:
+                    # ครอบคลุมทั้งคู่คอลัมน์แบบใหม่ (B-C, E-F, H-I, K-L, N-O) และแบบเก่า (A-B, D-E, G-H, J-K, M-N)
+                    all_pair_cols = [
+                        (1, 2), (4, 5), (7, 8), (10, 11), (13, 14),
+                        (0, 1), (3, 4), (6, 7), (9, 10), (12, 13)
+                    ]
+
+                    for target_sheet in ordered_sheets:
                         df_onsite = xl_file.parse(sheet_name=target_sheet, header=None, nrows=1500)
                         num_rows, num_cols = df_onsite.shape
-
-                        detected_pairs = []
-                        for r_scan in range(min(15, num_rows)):
-                            for c_scan in range(1, num_cols):
-                                cell_txt = str(df_onsite.iloc[r_scan, c_scan]).strip().lower()
-                                if "ผลรวม" in cell_txt or "onsite" in cell_txt or "ป้ายชื่อ" in cell_txt:
-                                    sample_nums = [clean_num(df_onsite.iloc[rr, c_scan]) for rr in range(r_scan + 1, min(r_scan + 20, num_rows))]
-                                    if any(v > 0 for v in sample_nums):
-                                        pair = (c_scan - 1, c_scan)
-                                        if pair not in detected_pairs:
-                                            detected_pairs.append(pair)
-
-                        if not detected_pairs:
-                            detected_pairs = [(c, c + 1) for c in range(0, num_cols - 1)]
-
                         temp_onsite_count = 0
-                        for lbl_col, val_col in detected_pairs:
-                            if val_col >= num_cols or lbl_col < 0:
+
+                        for lbl_col, val_col in all_pair_cols:
+                            if val_col >= num_cols:
                                 continue
 
                             current_item = None
@@ -256,8 +252,8 @@ def update_excel_cache():
                                 if pd.isna(raw_label):
                                     continue
 
-                                label_str = str(raw_label).strip()
-                                clean_label = re.sub(r'^[田\-\–\—\s]+', '', label_str).replace("ป้ายชื่อแถว", "").strip()
+                                label_str = str(raw_label).replace('\n', ' ').strip()
+                                clean_label = re.sub(r'^[田\-\–\—\s]+', '', label_str).replace("ป้ายชื่อแถว", "").replace("Row Labels", "").strip()
 
                                 if not clean_label or clean_label.lower() in ["nan", "none"]:
                                     continue
@@ -273,7 +269,7 @@ def update_excel_cache():
                                 next_val = -1
                                 next_clean = ""
                                 if next_r < num_rows and pd.notna(df_onsite.iloc[next_r, lbl_col]):
-                                    next_clean = re.sub(r'^[田\-\–\—\s]+', '', str(df_onsite.iloc[next_r, lbl_col])).strip()
+                                    next_clean = re.sub(r'^[田\-\–\—\s]+', '', str(df_onsite.iloc[next_r, lbl_col]).replace('\n', ' ')).strip()
                                     next_val = clean_num(df_onsite.iloc[next_r, val_col])
 
                                 is_code_like = len(clean_label) <= 15 and not any(ch in clean_label for ch in [" ", "/", ":", "(", ")"])
