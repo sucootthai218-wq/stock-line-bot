@@ -8,6 +8,7 @@ import datetime
 import gc
 import pytz
 import io
+import zipfile
 import pandas as pd
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -161,10 +162,11 @@ def update_excel_cache():
             file_id = file['id']
             file_name = file['name']
             file_mod = file.get('modifiedTime', '')
-            new_meta[file_name] = file_mod
 
-            if os.path.exists(file_name) and saved_meta.get(file_name) == file_mod:
+            # เช็คว่าไฟล์ที่มีอยู่แล้วในเครื่องสมบูรณ์ (เป็น zip ที่ถูกต้อง) และไม่มีการแก้ไข
+            if os.path.exists(file_name) and zipfile.is_zipfile(file_name) and saved_meta.get(file_name) == file_mod:
                 print(f"⏩ {file_name} ไม่มีการเปลี่ยนแปลง (ข้ามการดาวน์โหลด)")
+                new_meta[file_name] = file_mod
                 continue
 
             try:
@@ -177,9 +179,19 @@ def update_excel_cache():
                     status, done = downloader.next_chunk()
 
                 fh.seek(0)
-                with open(file_name, 'wb') as f:
+                temp_name = f"temp_{file_name}"
+                with open(temp_name, 'wb') as f:
                     f.write(fh.read())
-                print(f"✅ ดาวน์โหลดไฟล์ {file_name} สำเร็จ")
+
+                # ตรวจสอบว่าไฟล์ที่โหลดมาสมบูรณ์หรือไม่ก่อนนำไปใช้งานจริง
+                if zipfile.is_zipfile(temp_name):
+                    os.replace(temp_name, file_name)
+                    new_meta[file_name] = file_mod
+                    print(f"✅ ดาวน์โหลดไฟล์ {file_name} สำเร็จและไฟล์สมบูรณ์")
+                else:
+                    if os.path.exists(temp_name):
+                        os.remove(temp_name)
+                    print(f"⚠️ ไฟล์ {file_name} บน Drive ยังอัปโหลดไม่เสร็จ (ไฟล์ไม่สมบูรณ์) จะลองใหม่รอบถัดไป")
             except Exception as e:
                 print(f"❌ ดาวน์โหลดไฟล์ {file_name} ไม่สำเร็จ: {e}")
 
@@ -187,7 +199,7 @@ def update_excel_cache():
         # 🧹 ลบไฟล์ขยะหรือไฟล์เดือนเก่าที่ไม่มีใน Google Drive แล้ว
         # ----------------------------------------------------
         valid_drive_filenames = {f['name'] for f in valid_files}
-        local_xlsx_files = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
+        local_xlsx_files = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith(("~$", "temp_"))]
 
         for local_f in local_xlsx_files:
             fname = os.path.basename(local_f)
@@ -202,7 +214,7 @@ def update_excel_cache():
         new_project_map = {}
         new_onsite_map = {}
         
-        all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$") and os.path.basename(f) in valid_drive_filenames]
+        all_xlsx = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith(("~$", "temp_")) and os.path.basename(f) in valid_drive_filenames]
 
         stock_file_names = []
         onsite_file_names = []
@@ -212,14 +224,13 @@ def update_excel_cache():
             base_fname = os.path.basename(file_path)
 
             # ----------------------------------------------------
-            # 1. จัดการไฟล์ Onsite Report (รองรับทั้งแบบเริ่มคอลัมน์ A และคอลัมน์ B)
+            # 1. จัดการไฟล์ Onsite Report
             # ----------------------------------------------------
             if "onsite" in file_lower:
                 onsite_file_names.append(base_fname)
                 try:
                     xl_file = pd.ExcelFile(file_path, engine='openpyxl')
                     
-                    # ค้นหาชีต Onsite Quantity by Project ก่อน หากไม่มีค่อยดูชีตอื่นที่มีคำว่า onsite
                     ordered_sheets = []
                     for s in xl_file.sheet_names:
                         if 'onsite quantity by project' in s.lower():
@@ -229,7 +240,6 @@ def update_excel_cache():
                     if not ordered_sheets:
                         ordered_sheets = xl_file.sheet_names
 
-                    # ครอบคลุมทั้งคู่คอลัมน์แบบใหม่ (B-C, E-F, H-I, K-L, N-O) และแบบเก่า (A-B, D-E, G-H, J-K, M-N)
                     all_pair_cols = [
                         (1, 2), (4, 5), (7, 8), (10, 11), (13, 14),
                         (0, 1), (3, 4), (6, 7), (9, 10), (12, 13)
@@ -308,6 +318,9 @@ def update_excel_cache():
                             break
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์ Onsite ({file_path}): {e}")
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    new_meta.pop(base_fname, None)
                 continue
 
             # ----------------------------------------------------
@@ -413,6 +426,9 @@ def update_excel_cache():
                 del df_raw
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์สต็อก {file_path}: {e}")
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                new_meta.pop(base_fname, None)
 
         # หาเวลา modifiedTime ล่าสุดของไฟล์จริงจาก Google Drive
         latest_file_mtime = None
@@ -431,22 +447,26 @@ def update_excel_cache():
         else:
             now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
 
-        cache_payload = {
-            "last_updated": now_str,
-            "stock_files": ", ".join(sorted(stock_file_names)) if stock_file_names else "-",
-            "onsite_files": ", ".join(sorted(onsite_file_names)) if onsite_file_names else "-",
-            "stock_data": new_stock_map,
-            "project_data": list(new_project_map.values()),
-            "onsite_data": new_onsite_map
-        }
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache_payload, f, ensure_ascii=False)
+        # บันทึกแคชเฉพาะเมื่ออ่านสินค้าหลักได้มากกว่า 50 รายการ (ป้องกันการบันทึกแคชพิการทับของดี)
+        if len(new_stock_map) > 50 or not os.path.exists(CACHE_FILE):
+            cache_payload = {
+                "last_updated": now_str,
+                "stock_files": ", ".join(sorted(stock_file_names)) if stock_file_names else "-",
+                "onsite_files": ", ".join(sorted(onsite_file_names)) if onsite_file_names else "-",
+                "stock_data": new_stock_map,
+                "project_data": list(new_project_map.values()),
+                "onsite_data": new_onsite_map
+            }
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache_payload, f, ensure_ascii=False)
+            print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ (เวลาไฟล์: {now_str}): สินค้า {len(new_stock_map)} รายการ, Onsite {len(new_onsite_map)} รายการ")
+        else:
+            print("⚠️ พบข้อมูลสินค้าน้อยผิดปกติ (ไฟล์อาจกำลังอัปโหลด) คงใช้ Cache เดิมไปก่อน")
 
         with open(FILE_META_FILE, "w", encoding="utf-8") as mf:
             json.dump(new_meta, mf, ensure_ascii=False)
 
         gc.collect()
-        print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ (เวลาไฟล์: {now_str}): สินค้า {len(new_stock_map)} รายการ, Onsite {len(new_onsite_map)} รายการ")
         return True
     finally:
         is_updating = False
