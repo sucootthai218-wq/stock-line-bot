@@ -154,7 +154,8 @@ def update_excel_cache():
             try:
                 with open(FILE_META_FILE, 'r', encoding='utf-8') as mf:
                     saved_meta = json.load(mf)
-            except Exception: pass
+            except Exception:
+                pass
 
         new_meta = {}
 
@@ -227,7 +228,6 @@ def update_excel_cache():
             # 1. จัดการไฟล์ Onsite Report
             # ----------------------------------------------------
             if "onsite" in file_lower:
-                onsite_file_names.append(base_fname)
                 try:
                     xl_file = pd.ExcelFile(file_path, engine='openpyxl')
                     
@@ -314,6 +314,7 @@ def update_excel_cache():
                                         current_item['projects'][proj_name] = int(val_raw)
 
                         if temp_onsite_count > 0:
+                            onsite_file_names.append(base_fname)
                             print(f"✅ ประมวลผลชีต '{target_sheet}' สำเร็จ: พบรหัสสินค้า {temp_onsite_count} รายการ")
                             break
                 except Exception as e:
@@ -326,7 +327,6 @@ def update_excel_cache():
             # ----------------------------------------------------
             # 2. จัดการไฟล์สต็อกหลัก
             # ----------------------------------------------------
-            stock_file_names.append(base_fname)
             try:
                 xl_file = pd.ExcelFile(file_path, engine='openpyxl')
                 target_sheet = next((s for s in xl_file.sheet_names if 'stock' in s.lower()), 0)
@@ -424,6 +424,7 @@ def update_excel_cache():
                             new_stock_map[norm_c] = item_info
 
                 del df_raw
+                stock_file_names.append(base_fname)
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการอ่านไฟล์สต็อก {file_path}: {e}")
                 if os.path.exists(file_path):
@@ -439,7 +440,8 @@ def update_excel_cache():
                     dt_val = datetime.datetime.fromisoformat(mtime_str.replace('Z', '+00:00'))
                     if latest_file_mtime is None or dt_val > latest_file_mtime:
                         latest_file_mtime = dt_val
-                except Exception: pass
+                except Exception:
+                    pass
 
         tz = pytz.timezone('Asia/Bangkok')
         if latest_file_mtime:
@@ -447,8 +449,8 @@ def update_excel_cache():
         else:
             now_str = datetime.datetime.now(tz).strftime('%d/%m/%Y เวลา %H:%M น.')
 
-        # บันทึกแคชเฉพาะเมื่ออ่านสินค้าหลักได้มากกว่า 50 รายการ (ป้องกันการบันทึกแคชพิการทับของดี)
-        if len(new_stock_map) > 50 or not os.path.exists(CACHE_FILE):
+        # บันทึกแคชเฉพาะเมื่ออ่านสินค้าครบทั้ง 2 ไฟล์ (มากกว่า 500 รายการ) หรือยังไม่มีไฟล์แคชเลย
+        if len(new_stock_map) > 500 or not os.path.exists(CACHE_FILE):
             cache_payload = {
                 "last_updated": now_str,
                 "stock_files": ", ".join(sorted(stock_file_names)) if stock_file_names else "-",
@@ -461,7 +463,7 @@ def update_excel_cache():
                 json.dump(cache_payload, f, ensure_ascii=False)
             print(f"[{datetime.datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}] สร้าง Cache สำเร็จ (เวลาไฟล์: {now_str}): สินค้า {len(new_stock_map)} รายการ, Onsite {len(new_onsite_map)} รายการ")
         else:
-            print("⚠️ พบข้อมูลสินค้าน้อยผิดปกติ (ไฟล์อาจกำลังอัปโหลด) คงใช้ Cache เดิมไปก่อน")
+            print(f"⚠️ ข้อมูลสินค้ามาไม่ครบ ({len(new_stock_map)} รายการ) อาจมีไฟล์กำลังอัปโหลด คงใช้ Cache เดิมไปก่อน")
 
         with open(FILE_META_FILE, "w", encoding="utf-8") as mf:
             json.dump(new_meta, mf, ensure_ascii=False)
@@ -476,7 +478,8 @@ def load_stock_cache():
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception: pass
+        except Exception:
+            pass
     return None
 
 # ==========================================
